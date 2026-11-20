@@ -46,13 +46,10 @@ public final class AppModel: ObservableObject {
     /// True while the Company tab is open: spoken commands naming a person or team go there instead of the chat.
     public var companyViewActive = false
     let teamAgent: TeamAgent = LangGraphTeamAgent()
-    @Published public var messages: [ChatMessage] = []
     @Published public var approvals: [ApprovalRequest] = []
     @Published public var settings: DamsonSettings {
         didSet { settingsChanged() }
     }
-    @Published public var inputText: String = ""
-    @Published public var isResponding = false
     @Published public var notice: String = ""
     @Published public var mcpLog: [String] = []
     @Published public var ollamaModels: [String] = []
@@ -65,10 +62,8 @@ public final class AppModel: ObservableObject {
 
     private let hotKey = GlobalHotKey(id: 1)          // Control+Option+Space: hold to talk
     private let conversationKey = GlobalHotKey(id: 2) // Control+Option+D: start/stop hands-free conversation
-    private var responseTask: Task<Void, Never>?
     private var started = false
     private var cancellables = Set<AnyCancellable>()
-    private var liveVoiceID: UUID?
 
 
     public init() {
@@ -100,13 +95,6 @@ public final class AppModel: ObservableObject {
         guard !started else { return }
         started = true
 
-        if let history = try? engine.store.recentMessages(limit: 30) {
-            for m in history {
-                let kind: ChatMessage.Kind = m.role == "user" ? .user : .assistant
-                messages.append(ChatMessage(kind: kind, text: m.text, viaVoice: m.source == "voice"))
-            }
-        }
-
         let stream = engine.bus.subscribe()
         Task { [weak self] in
             for await event in stream {
@@ -117,16 +105,6 @@ public final class AppModel: ObservableObject {
         voice.onUtterance = { [weak self] text in
             await self?.handleVoiceUtterance(text)
         }
-        voice.onInterrupt = { [weak self] in
-            Task { @MainActor in self?.cancelResponse() }
-        }
-        // Show what the user is saying, live, in the chat.
-        voiceStatus.$partialTranscript
-            .removeDuplicates()
-            .sink { [weak self] text in
-                self?.handlePartialTranscript(text)
-            }
-            .store(in: &cancellables)
         applyVoiceConfig()
 
         hotKey.onPress = { [weak self] in
@@ -202,104 +180,11 @@ public final class AppModel: ObservableObject {
         }
     }
 
-    // MARK: Chat
-
-    public func send() {
-        let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        inputText = ""
-        messages.append(ChatMessage(kind: .user, text: text))
-        let speak = settings.voiceOutputEnabled && voiceStatus.mode != .off
-        let task = Task { @MainActor in
-            await self.respond(to: text, source: .text, speak: speak)
-        }
-        responseTask = task
-    }
-
-    private func handlePartialTranscript(_ text: String) {
-        if text.isEmpty {
-            // The turn ended or was cancelled. If no final text arrives shortly, drop the unfinished bubble.
-            guard let id = liveVoiceID else { return }
-            Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 1_500_000_000)
-                if self.liveVoiceID == id {
-                    self.messages.removeAll { $0.id == id }
-                    self.liveVoiceID = nil
-                }
-            }
-            return
-        }
-        if let id = liveVoiceID, let i = messages.firstIndex(where: { $0.id == id }) {
-            messages[i].text = text
-        } else {
-            let live = ChatMessage(kind: .user, text: text, viaVoice: true, isLive: true)
-            liveVoiceID = live.id
-            messages.append(live)
-        }
-    }
-
-    private func finalizeLiveVoiceMessage(with text: String) {
-        if let id = liveVoiceID, let i = messages.firstIndex(where: { $0.id == id }) {
-            messages[i].text = text
-            messages[i].isLive = false
-        } else {
-            messages.append(ChatMessage(kind: .user, text: text, viaVoice: true))
-        }
-        liveVoiceID = nil
-    }
+    // MARK: Voice input
 
     private func handleVoiceUtterance(_ text: String) async {
         DebugLog.write("utterance sent to Damson: '\(text)'")
-        if companyViewActive {
-            // Company voice never lands in the main chat: drop the live bubble and route it to the people.
-            if let id = liveVoiceID { messages.removeAll { $0.id == id }; liveVoiceID = nil }
-            if await runCompanyCommand(text, speak: true, viaVoice: true) { return }
-            messages.append(ChatMessage(kind: .user, text: text, viaVoice: true))
-        } else {
-            finalizeLiveVoiceMessage(with: text)
-        }
-        let task = Task { @MainActor in
-            await self.respond(to: text, source: .voice, speak: true)
-        }
-        responseTask = task
-        await task.value
-    }
-
-    private func respond(to text: String, source: InputSource, speak: Bool) async {
-        isResponding = true
-        let reply = ChatMessage(kind: .assistant, text: "", viaVoice: source == .voice)
-        let replyID = reply.id
-        messages.append(reply)
-        let accumulated = Locked<String>("")
-        let voice = self.voice
-
-        _ = await engine.converse(text, source: source) { [weak self] sentence in
-            let full = accumulated.withLock { (s: inout String) -> String in
-                s += (s.isEmpty ? "" : " ") + sentence
-                return s
-            }
-            Task { @MainActor in self?.setAssistantText(id: replyID, text: full) }
-            if speak { voice.speak(sentence) }
-        }
-        isResponding = false
-        if accumulated.current.isEmpty {
-            messages.removeAll { $0.id == replyID }
-        }
-    }
-
-    private func setAssistantText(id: UUID, text: String) {
-        if let i = messages.firstIndex(where: { $0.id == id }) {
-            messages[i].text = text
-        }
-    }
-
-    public func cancelResponse() {
-        responseTask?.cancel()
-    }
-
-    public func clearChat() {
-        messages.removeAll()
-        Task { await engine.clearConversation() }
+        _ = await runCompanyCommand(text, speak: true, viaVoice: true)
     }
 
     // MARK: Voice
@@ -350,7 +235,6 @@ public final class AppModel: ObservableObject {
         switch event {
         case .approvalRequested(let a):
             approvals.append(a)
-            messages.append(ChatMessage(kind: .system, text: "Approval needed: \(a.summary)"))
             alert(sound: settings.soundOnNeedsInput, name: "Ping",
                   speak: settings.speakNeedsInput,
                   text: "I need your approval. \(a.summary). Say approve, or deny.")

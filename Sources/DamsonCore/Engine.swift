@@ -39,7 +39,6 @@ public final class DamsonEngine: @unchecked Sendable {
     public let mcp = MCPManager()
 
     private let settingsBox: Locked<DamsonSettings>
-    private let conversation = ConversationState()
     private let personChats = Locked<[String: ConversationState]>([:])
 
     public init(store: DamsonStore, settings: DamsonSettings) {
@@ -147,78 +146,6 @@ public final class DamsonEngine: @unchecked Sendable {
         if once.contains(n) { return .approveOnce }
         if deny.contains(n) { return .deny }
         return nil
-    }
-
-    // MARK: Conversation
-
-    /// One conversational turn. Sentences are delivered as soon as they are complete so speech can start early.
-    /// Returns the full spoken/printed reply text.
-    public func converse(_ text: String, source: InputSource, onSentence: @escaping @Sendable (String) -> Void) async -> String {
-        // Approvals are decided only by the user's own words, never by a model.
-        if !approvals.pendingRequests().isEmpty, let decision = Self.approvalDecision(for: text),
-           let oldest = approvals.pendingRequests().first {
-            approvals.resolve(id: oldest.id, decision: decision)
-            let reply: String
-            switch decision {
-            case .deny: reply = "Denied."
-            case .approveOnce: reply = "Approved."
-            case .approveForTask: reply = "Approved for this task."
-            }
-            onSentence(reply)
-            return reply
-        }
-
-        let cfg = settings
-        DebugLog.write("user (\(source.rawValue)): '\(text.prefix(300))'")
-        var reply = ""
-        var newMessages: [Message] = [Message(role: .user, text: text)]
-        try? store.saveMessage(id: UUID().uuidString, role: "user", text: text, source: source.rawValue)
-
-        let system = Prompts.conversation(style: cfg.style, verbosity: cfg.verbosity, now: Date())
-        let history = await conversation.snapshot() + newMessages
-        var splitter = SentenceSplitter()
-        var finalResponse: LLMResponse?
-        var roundText = ""
-
-        do {
-            for try await event in gateway.stream(role: .conversation, system: system, messages: history, maxTokens: 1024) {
-                switch event {
-                case .textDelta(let delta):
-                    roundText += delta
-                    for sentence in splitter.push(delta) { onSentence(sentence) }
-                case .toolCall:
-                    break
-                case .done(let response):
-                    finalResponse = response
-                }
-            }
-            DebugLog.write("conversation model (\(gateway.routeLabel(for: .conversation))) said: '\(roundText.prefix(300))'")
-            if let rest = splitter.flush() { onSentence(rest) }
-            reply += roundText
-            if let response = finalResponse { newMessages.append(response.message) }
-        } catch {
-            if !(Task.isCancelled || error is CancellationError) {
-                DebugLog.write("conversation model error: \(error.localizedDescription)")
-                let message = "I'm sorry, I couldn't reach the model. \(error.localizedDescription)"
-                onSentence(message)
-                reply += message
-            }
-        }
-
-        // Only keep a coherent transcript (the last message must be an assistant message).
-        if let last = newMessages.last, last.role == .assistant {
-            await conversation.append(newMessages)
-            await conversation.trim(maxMessages: 40)
-        }
-        let trimmed = reply.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty {
-            try? store.saveMessage(id: UUID().uuidString, role: "assistant", text: trimmed, source: "assistant")
-        }
-        return trimmed
-    }
-
-    public func clearConversation() async {
-        await conversation.clear()
     }
 
     private func personState(_ id: String) -> ConversationState {

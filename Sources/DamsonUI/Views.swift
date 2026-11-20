@@ -6,7 +6,6 @@ import DamsonCore
 import DamsonVoice
 
 enum SidebarItem: String, CaseIterable, Identifiable {
-    case chat = "Chat"
     case company = "Company"
     case projects = "Projects"
     case settings = "Settings"
@@ -15,7 +14,6 @@ enum SidebarItem: String, CaseIterable, Identifiable {
 
     var icon: String {
         switch self {
-        case .chat: return "bubble.left.and.bubble.right"
         case .company: return "building.2.fill"
         case .projects: return "list.bullet.clipboard.fill"
         case .settings: return "gearshape"
@@ -25,8 +23,8 @@ enum SidebarItem: String, CaseIterable, Identifiable {
 
 public struct RootView: View {
     @ObservedObject var model: AppModel
-    /// "chat", "company", "settings", "team:<id>" or "person:<id>".
-    @State private var selection: String? = "chat"
+    /// "company", "settings", "team:<id>" or "person:<id>".
+    @State private var selection: String? = "company"
     @State private var companyOpen = true
     @State private var collapsedTeams: Set<String> = []
 
@@ -35,8 +33,7 @@ public struct RootView: View {
     }
 
     private var page: SidebarItem {
-        guard let s = selection else { return .chat }
-        if s == "chat" { return .chat }
+        guard let s = selection else { return .company }
         if s == "settings" { return .settings }
         if s == "projects" { return .projects }
         return .company
@@ -98,7 +95,7 @@ public struct RootView: View {
     }
 
     private func applySelection(_ new: String?) {
-        model.companyViewActive = new != nil && new != "chat" && new != "settings" && new != "projects"
+        model.companyViewActive = new != nil && new != "settings" && new != "projects"
         guard let new else { return }
         if new.hasPrefix("person:") {
             model.selectedPeople = [String(new.dropFirst(7))]
@@ -110,7 +107,6 @@ public struct RootView: View {
     public var body: some View {
         NavigationSplitView {
             List(selection: $selection) {
-                Label("Chat", systemImage: SidebarItem.chat.icon).tag("chat")
                 companyTree
                 Label("Projects", systemImage: SidebarItem.projects.icon).tag("projects")
                 Label("Settings", systemImage: SidebarItem.settings.icon).tag("settings")
@@ -122,7 +118,6 @@ public struct RootView: View {
                     ApprovalBanner(model: model)
                 }
                 switch page {
-                case .chat: ChatView(model: model, status: model.voiceStatus)
                 case .company: CompanyView(model: model, status: model.voiceStatus)
                 case .projects: ProjectsView(model: model)
                 case .settings: SettingsView(model: model)
