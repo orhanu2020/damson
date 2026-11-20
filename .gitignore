@@ -1,0 +1,14 @@
+.build/
+build/
+*.xcodeproj
+xcuserdata/
+.swiftpm/
+.DS_Store
+.env
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+build.log
+test.log
+status.txt
+voice.log
