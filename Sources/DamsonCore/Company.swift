@@ -43,7 +43,7 @@ public struct Person: Identifiable, Codable, Equatable, Sendable {
     }
 }
 
-/// A reusable skill: instructions an agent follows when it is assigned. The name is its identity.
+/// A starter skill. Seeded as a real SKILL.md (see SkillStore); also the shape of skills from older company files.
 public struct Skill: Identifiable, Codable, Equatable, Sendable {
     public var name: String
     public var instructions: String
@@ -52,6 +52,12 @@ public struct Skill: Identifiable, Codable, Equatable, Sendable {
     public init(name: String, instructions: String) {
         self.name = name
         self.instructions = instructions
+    }
+
+    /// The "when to use" line Claude reads to decide whether to load the skill.
+    public var description: String {
+        let first = instructions.split(separator: ".").first.map(String.init) ?? instructions
+        return "Use when the work calls for \(name.lowercased()). \(first)."
     }
 
     public static let builtins: [Skill] = [
@@ -94,12 +100,12 @@ public struct Team: Identifiable, Codable, Equatable, Sendable {
 public struct Company: Codable, Equatable, Sendable {
     public var name: String
     public var teams: [Team]
-    public var skillLibrary: [Skill]
+    /// Skills stored inside older company files. Read once so they can be moved to SKILL.md folders; never written back.
+    public var legacySkills: [Skill] = []
 
-    public init(name: String, teams: [Team], skillLibrary: [Skill] = Skill.builtins) {
+    public init(name: String, teams: [Team]) {
         self.name = name
         self.teams = teams
-        self.skillLibrary = skillLibrary
     }
 
     enum CodingKeys: String, CodingKey { case name, teams, skillLibrary }
@@ -108,7 +114,17 @@ public struct Company: Codable, Equatable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         name = try c.decode(String.self, forKey: .name)
         teams = try c.decode([Team].self, forKey: .teams)
-        skillLibrary = try c.decodeIfPresent([Skill].self, forKey: .skillLibrary) ?? Skill.builtins
+        legacySkills = try c.decodeIfPresent([Skill].self, forKey: .skillLibrary) ?? []
+        // Skills are named like Claude skills now (lowercase-with-hyphens).
+        for t in teams.indices { for m in teams[t].members.indices {
+            teams[t].members[m].skills = teams[t].members[m].skills.map { SkillStore.slug($0) }
+        } }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(name, forKey: .name)
+        try c.encode(teams, forKey: .teams)
     }
 
     public var allPeople: [Person] { teams.flatMap { $0.members } }

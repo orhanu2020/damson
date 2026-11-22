@@ -104,6 +104,13 @@ public enum StopReason: String, Sendable, Codable {
     case other
 }
 
+/// A Claude skill folder (with a SKILL.md) an agent may use.
+public struct SkillRef: Sendable, Equatable {
+    public var name: String
+    public var directory: URL
+    public init(name: String, directory: URL) { self.name = name; self.directory = directory }
+}
+
 public struct LLMRequest: Sendable {
     public var model: String
     public var system: String
@@ -113,6 +120,9 @@ public struct LLMRequest: Sendable {
     public var temperature: Double?
     /// nil = the model's default. Only used by providers that support a reasoning switch (Ollama).
     public var thinking: Bool?
+    /// Skills the agent may load (Claude provider only), and other known skill names it must not.
+    public var skills: [SkillRef] = []
+    public var blockedSkills: [String] = []
 
     public init(model: String, system: String = "", messages: [Message], tools: [ToolSpec] = [], maxTokens: Int = 2048, temperature: Double? = nil, thinking: Bool? = nil) {
         self.model = model

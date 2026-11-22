@@ -171,6 +171,7 @@ public final class DamsonEngine: @unchecked Sendable {
         let system = Prompts.person(person, company: company, style: cfg.style, verbosity: .detailed, now: Date(), work: true)
         let route = person.model.map { ModelRoute(provider: ClaudeCodeProvider.providerID, model: $0) }
         let specs = tools.specs.filter { !person.disabledTools.contains($0.name) }
+        let sel = SkillStore.selection(for: person.skills, all: SkillStore.list())
         let context = ToolContext(taskID: "project-\(directory.lastPathComponent)", subtaskID: stage,
                                   scratchDir: directory, workspaceDir: directory)
         var messages: [Message] = [Message(role: .user, text: instruction)]
@@ -180,7 +181,7 @@ public final class DamsonEngine: @unchecked Sendable {
             var finalResponse: LLMResponse?
             var roundText = ""
             for try await event in gateway.stream(role: .conversation, system: system, messages: messages,
-                                                  tools: specs, maxTokens: 8000, route: route) {
+                                                  tools: specs, maxTokens: 8000, route: route, skills: sel.refs, blockedSkills: sel.blocked) {
                 switch event {
                 case .textDelta(let d): roundText += d
                 case .toolCall: break
@@ -222,6 +223,7 @@ public final class DamsonEngine: @unchecked Sendable {
         let system = Prompts.person(person, company: company, style: cfg.style, verbosity: cfg.verbosity, now: Date())
         let route = person.model.map { ModelRoute(provider: ClaudeCodeProvider.providerID, model: $0) }
         let specs = tools.specs.filter { !person.disabledTools.contains($0.name) }
+        let sel = SkillStore.selection(for: person.skills, all: SkillStore.list())
 
         let scratch = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Damson/scratch/\(person.id)")
@@ -237,7 +239,7 @@ public final class DamsonEngine: @unchecked Sendable {
                 var finalResponse: LLMResponse?
                 var roundText = ""
                 for try await event in gateway.stream(role: .conversation, system: system, messages: history,
-                                                      tools: specs, maxTokens: 1024, route: route) {
+                                                      tools: specs, maxTokens: 1024, route: route, skills: sel.refs, blockedSkills: sel.blocked) {
                     switch event {
                     case .textDelta(let delta):
                         roundText += delta

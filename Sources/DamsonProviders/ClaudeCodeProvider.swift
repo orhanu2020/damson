@@ -111,6 +111,9 @@ public final class ClaudeCodeProvider: LLMProvider, @unchecked Sendable {
         return (text.trimmingCharacters(in: .whitespacesAndNewlines), calls)
     }
 
+    /// Skills that ship inside Claude Code. Agents only get the skills they were given.
+    static let bundledSkills: Set<String> = ["deep-research", "design", "slides", "design-sync", "dataviz", "artifact-diagramming", "whiteboard", "artifact-capabilities", "update-config", "verify", "debug", "code-review", "simplify", "batch", "fewer-permission-prompts", "doctor", "loop", "schedule", "claude-api", "workflow-authoring", "run", "run-skill-generator", "plugin-authoring", "init", "review", "security-review"]
+
     // MARK: LLMProvider
 
     public func complete(_ request: LLMRequest) async throws -> LLMResponse {
@@ -128,13 +131,29 @@ public final class ClaudeCodeProvider: LLMProvider, @unchecked Sendable {
                     guard let cli = Self.locate() else {
                         throw LLMError.subscription("The Claude Code CLI was not found. Install it (npm install -g @anthropic-ai/claude-code), run `claude` once and sign in with your Claude account.")
                     }
-                    let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("damson-claude-cli")
+                    var scratch = FileManager.default.temporaryDirectory.appendingPathComponent("damson-claude-cli")
+                    var skillArgs = ["--tools", "", "--setting-sources", ""]
+                    var ownScratch = false
+                    if !request.skills.isEmpty {
+                        // Real Claude skills: a private project folder whose .claude/skills the CLI loads natively.
+                        scratch = FileManager.default.temporaryDirectory.appendingPathComponent("damson-claude-\(UUID().uuidString.prefix(8))")
+                        ownScratch = true
+                        let skillsDir = scratch.appendingPathComponent(".claude/skills", isDirectory: true)
+                        try FileManager.default.createDirectory(at: skillsDir, withIntermediateDirectories: true)
+                        for s in request.skills {
+                            try? FileManager.default.createSymbolicLink(at: skillsDir.appendingPathComponent(s.name), withDestinationURL: s.directory)
+                        }
+                        let denied = Set(request.blockedSkills).union(Self.bundledSkills).subtracting(request.skills.map { $0.name })
+                        skillArgs = ["--tools", "Skill", "--setting-sources", "project", "--strict-mcp-config"]
+                        if !denied.isEmpty { skillArgs += ["--disallowedTools"] + denied.sorted().map { "Skill(\($0))" } }
+                    }
+                    defer { if ownScratch { try? FileManager.default.removeItem(at: scratch) } }
                     try? FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
 
                     process.executableURL = URL(fileURLWithPath: cli.path)
                     process.currentDirectoryURL = scratch
                     process.arguments = ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
-                                         "--model", request.model, "--tools", "", "--setting-sources", "",
+                                         "--model", request.model] + skillArgs + [
                                          "--no-session-persistence",
                                          "--system-prompt", request.system + Self.toolPrompt(request.tools)]
                     var env = ProcessInfo.processInfo.environment

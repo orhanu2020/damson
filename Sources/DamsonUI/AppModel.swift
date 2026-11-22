@@ -32,6 +32,8 @@ public final class AppModel: ObservableObject {
     @Published public var company: Company = Company.load() ?? .sample {
         didSet { company.save() }
     }
+    /// Claude skills (SKILL.md folders) from Damson's folder and ~/.claude/skills.
+    @Published public var skills: [SkillInfo] = []
     @Published public var selectedPeople: Set<String> = []
     @Published public var personStatus: [String: PersonStatus] = [:]
     /// Direct chats with people, by person id.
@@ -85,6 +87,14 @@ public final class AppModel: ObservableObject {
         self.voiceStatus = status
         self.voice = VoiceController(status: status)
         self.notice = startupNotice
+
+        // Skills are SKILL.md folders. Seed the starters and move skills from older company files over once.
+        SkillStore.seedBuiltins()
+        for legacy in company.legacySkills where !Skill.builtins.contains(where: { $0.name == legacy.name }) {
+            _ = try? SkillStore.save(name: legacy.name, description: legacy.description, body: legacy.instructions)
+        }
+        if !company.legacySkills.isEmpty { company.legacySkills = []; company.save() }
+        reloadSkills()
 
         Task { await self.start() }
     }

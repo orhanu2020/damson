@@ -34,9 +34,6 @@ enum Prompts {
     static func person(_ person: Person, company: Company, style: AssistantStyle, verbosity: Verbosity, now: Date, work: Bool = false) -> String {
         let colleagues = company.allPeople.filter { $0.id != person.id }
             .map { "\($0.name) (\($0.role))" }.joined(separator: ", ")
-        let assigned = person.skills.compactMap { n in company.skillLibrary.first { $0.name == n } }
-        let skillBlock = assigned.isEmpty ? "" : "Your skills. Use them when relevant, and say so plainly when something is outside them:\n" +
-            assigned.map { "- \($0.name): \($0.instructions)" }.joined(separator: "\n")
         let verbosityLine = verbosity == .detailed ? "You may go into detail when it helps." : "Keep replies short, one to three sentences."
         let formatter = DateFormatter()
         formatter.dateStyle = .full
@@ -49,7 +46,7 @@ enum Prompts {
         - Reply in the language the user writes or speaks (Turkish or English).
         - Your replies may be spoken aloud: plain sentences, no markdown, no lists, no emoji. \(verbosityLine)
         - You may have tools (shell, files, web, browser) available. Use them when the user asks for real work; actions that change things need the user's approval first, so say what you are about to do. If you have no tool for something, say so plainly. Never claim to have done work you did not do.
-        \(skillBlock)
+        \(person.skills.isEmpty ? "" : "- You have skills (Claude Agent Skills). Load one with the Skill tool whenever the task fits its description, and follow it.\n")
         - Your colleagues: \(colleagues).
         - Be honest about uncertainty. Never invent results.
 

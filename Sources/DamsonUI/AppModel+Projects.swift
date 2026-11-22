@@ -8,18 +8,17 @@ extension AppModel {
     /// Adds whichever of the four delivery teams (Project Management, Business Analysis, Dev, Test) are missing,
     /// each with an agent that has fitting skills and a Claude model.
     func setupDeliveryTeams() {
-        for skill in Skill.builtins where !company.skillLibrary.contains(where: { $0.name == skill.name }) {
-            company.skillLibrary.append(skill)
-        }
+        SkillStore.seedBuiltins()
+        reloadSkills()
         let plan: [(StageKind, String, Person)] = [
             (.requirements, "Business Analysis", Person(id: newPersonID(), name: "Kerem Aksoy", role: "Business Analyst",
-                skills: ["Requirements analysis", "Research & summarizing"], model: "claude-sonnet-5-5")),
+                skills: [SkillStore.slug("Requirements analysis"), SkillStore.slug("Research & summarizing")], model: "claude-sonnet-5-5")),
             (.estimate, "Project Management", Person(id: newPersonID(), name: "Selma Yıldırım", role: "Project Manager",
-                skills: ["Time & effort estimation", "Project management"], model: "claude-sonnet-5-5")),
+                skills: [SkillStore.slug("Time & effort estimation"), SkillStore.slug("Project management")], model: "claude-sonnet-5-5")),
             (.development, "Dev", Person(id: newPersonID(), name: "Mert Çelik", role: "Senior Developer",
-                skills: ["Software development", "Backend & APIs", "Deployment & DevOps"], model: "claude-opus-5-5")),
+                skills: [SkillStore.slug("Software development"), SkillStore.slug("Backend & APIs"), SkillStore.slug("Deployment & DevOps")], model: "claude-opus-5-5")),
             (.testing, "Test", Person(id: newPersonID(), name: "Nehir Tan", role: "QA Engineer",
-                skills: ["Test automation", "Testing & QA"], model: "claude-sonnet-5-5")),
+                skills: [SkillStore.slug("Test automation"), SkillStore.slug("Testing & QA")], model: "claude-sonnet-5-5")),
         ]
         for (kind, teamName, person) in plan where ProjectFlow.team(for: kind, in: company) == nil {
             guard company.teams.count < Company.maxTeams else { break }

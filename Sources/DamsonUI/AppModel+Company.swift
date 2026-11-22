@@ -52,24 +52,26 @@ extension AppModel {
         company.teams.removeAll { $0.id == id }
     }
 
-    func saveSkill(_ skill: Skill, replacing oldName: String?) {
-        if let old = oldName, let i = company.skillLibrary.firstIndex(where: { $0.name == old }) {
-            company.skillLibrary[i] = skill
-            if old != skill.name {
-                for t in company.teams.indices { for m in company.teams[t].members.indices {
-                    company.teams[t].members[m].skills = company.teams[t].members[m].skills.map { $0 == old ? skill.name : $0 }
-                } }
-            }
-        } else if !company.skillLibrary.contains(where: { $0.name == skill.name }) {
-            company.skillLibrary.append(skill)
+    func reloadSkills() { skills = SkillStore.list() }
+
+    /// Saves a skill as a SKILL.md folder. Renaming moves the folder and updates the agents that have it.
+    func saveSkill(name: String, description: String, instructions: String, replacing old: String?) {
+        guard let slug = try? SkillStore.save(name: name, description: description, body: instructions) else { return }
+        if let old, old != slug {
+            SkillStore.delete(name: old)
+            for t in company.teams.indices { for m in company.teams[t].members.indices {
+                company.teams[t].members[m].skills = company.teams[t].members[m].skills.map { $0 == old ? slug : $0 }
+            } }
         }
+        reloadSkills()
     }
 
     func deleteSkill(_ name: String) {
-        company.skillLibrary.removeAll { $0.name == name }
+        SkillStore.delete(name: name)
         for t in company.teams.indices { for m in company.teams[t].members.indices {
             company.teams[t].members[m].skills.removeAll { $0 == name }
         } }
+        reloadSkills()
     }
 
     func addPerson(_ person: Person, to teamID: String) {

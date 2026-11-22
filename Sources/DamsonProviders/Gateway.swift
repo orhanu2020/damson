@@ -107,14 +107,16 @@ public final class ModelGateway: @unchecked Sendable {
         return "\(r.provider):\(r.model)"
     }
 
-    private func build(role: AgentRole, system: String, messages: [Message], tools: [ToolSpec], maxTokens: Int, route override: ModelRoute? = nil) throws -> (LLMProvider, LLMRequest) {
+    private func build(role: AgentRole, system: String, messages: [Message], tools: [ToolSpec], maxTokens: Int, route override: ModelRoute? = nil, skills: [SkillRef] = [], blockedSkills: [String] = []) throws -> (LLMProvider, LLMRequest) {
         let route = override ?? routing().route(for: role)
         guard let provider = registry.provider(id: route.provider) else {
             throw LLMError.unknownProvider(route.provider)
         }
         var effectiveTools = tools
         if !provider.capabilities.toolUse { effectiveTools = [] }
-        let request = LLMRequest(model: route.model, system: system, messages: messages, tools: effectiveTools, maxTokens: maxTokens, thinking: route.thinking)
+        var request = LLMRequest(model: route.model, system: system, messages: messages, tools: effectiveTools, maxTokens: maxTokens, thinking: route.thinking)
+        request.skills = skills
+        request.blockedSkills = blockedSkills
         return (provider, request)
     }
 
@@ -125,11 +127,11 @@ public final class ModelGateway: @unchecked Sendable {
         return response
     }
 
-    public func stream(role: AgentRole, system: String, messages: [Message], tools: [ToolSpec] = [], maxTokens: Int = 1024, route override: ModelRoute? = nil) -> AsyncThrowingStream<LLMEvent, Error> {
+    public func stream(role: AgentRole, system: String, messages: [Message], tools: [ToolSpec] = [], maxTokens: Int = 1024, route override: ModelRoute? = nil, skills: [SkillRef] = [], blockedSkills: [String] = []) -> AsyncThrowingStream<LLMEvent, Error> {
         return AsyncThrowingStream<LLMEvent, Error> { continuation in
             let task = Task {
                 do {
-                    let (provider, request) = try self.build(role: role, system: system, messages: messages, tools: tools, maxTokens: maxTokens, route: override)
+                    let (provider, request) = try self.build(role: role, system: system, messages: messages, tools: tools, maxTokens: maxTokens, route: override, skills: skills, blockedSkills: blockedSkills)
                     for try await event in provider.stream(request) {
                         if case .done(let response) = event {
                             self.usageHandler.current?(role, provider.id, request.model, response.usage)
