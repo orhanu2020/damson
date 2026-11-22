@@ -15,9 +15,100 @@ extension AppModel {
 
     private func newPersonID() -> String { String(UUID().uuidString.prefix(8)).lowercased() }
 
-    /// Which roles cannot work because no team matches them.
-    func missingTeams() -> [TeamRole] {
-        TeamRole.allCases.filter { ProjectFlow.team(for: $0, in: company) == nil }
+    /// The company as this project sees it: only the teams working on the project.
+    func projectCompany(_ project: Project) -> Company {
+        var c = company
+        c.teams = c.teams.filter { project.usesTeam($0.id) }
+        return c
+    }
+
+    /// Which roles used by the process have no team in the project (steps given to one agent do not need one).
+    func missingTeams(for project: Project) -> [TeamRole] {
+        let scope = projectCompany(project)
+        let roles = Set(project.steps.filter { $0.kind != .approval && $0.agentID == nil }.compactMap { $0.role })
+        return TeamRole.allCases.filter { roles.contains($0) && ProjectFlow.team(for: $0, in: scope) == nil }
+    }
+
+    /// Everybody who can be given a step in this project: the people of its teams and its extra agents.
+    func projectAgents(_ project: Project) -> [Person] {
+        var people = projectCompany(project).teams.flatMap { $0.members }
+        for team in company.teams { for p in team.members where project.agentIDs.contains(p.id) && !people.contains(where: { $0.id == p.id }) { people.append(p) } }
+        return people
+    }
+
+    // MARK: Editing a project
+
+    func setBrief(_ projectID: String, _ text: String) {
+        update(projectID) { $0.brief = text }
+        if let p = projects.first(where: { $0.id == projectID }) {
+            prepareFolders(p)
+            try? text.write(to: p.folderURL.appendingPathComponent("handoff/00-brief.md"), atomically: true, encoding: .utf8)
+        }
+    }
+
+    func setTeam(_ projectID: String, _ teamID: String, on: Bool) {
+        update(projectID) { p in
+            var ids = p.teamIDs.isEmpty ? company.teams.map { $0.id } : p.teamIDs
+            if on { if !ids.contains(teamID) { ids.append(teamID) } } else { ids.removeAll { $0 == teamID } }
+            p.teamIDs = Set(ids) == Set(company.teams.map { $0.id }) ? [] : ids
+        }
+    }
+
+    func setAgent(_ projectID: String, _ personID: String, on: Bool) {
+        update(projectID) { p in
+            p.agentIDs.removeAll { $0 == personID }
+            if on { p.agentIDs.append(personID) }
+        }
+    }
+
+    // MARK: Editing the process (not while it runs)
+
+    func editStep(_ projectID: String, _ stepID: String, _ change: (inout FlowStep) -> Void) {
+        guard !isRunning(projectID) else { return }
+        updateStep(projectID, stepID, change)
+    }
+
+    /// Moving a step is only layout, so it is allowed while running.
+    func moveStep(_ projectID: String, _ stepID: String, to point: CGPoint) {
+        updateStep(projectID, stepID) { $0.x = Double(max(0, point.x)); $0.y = Double(max(0, point.y)) }
+    }
+
+    @discardableResult
+    func addStep(_ projectID: String, kind: StepKind, at point: CGPoint) -> String? {
+        guard !isRunning(projectID) else { return nil }
+        var id: String?
+        update(projectID) { id = $0.addStep(kind: kind, at: point) }
+        return id
+    }
+
+    func removeStep(_ projectID: String, _ stepID: String) {
+        guard !isRunning(projectID) else { return }
+        update(projectID) { $0.removeStep(stepID) }
+    }
+
+    @discardableResult
+    func connect(_ projectID: String, from: String, to: String) -> Bool {
+        guard !isRunning(projectID) else { return false }
+        var ok = false
+        update(projectID) { ok = $0.connect(from: from, to: to) }
+        return ok
+    }
+
+    func setEdge(_ projectID: String, _ edgeID: String, condition: EdgeCondition?) {
+        guard !isRunning(projectID) else { return }
+        update(projectID) { p in
+            guard let i = p.edges.firstIndex(where: { $0.id == edgeID }) else { return }
+            if let condition { p.edges[i].condition = condition } else { p.edges.remove(at: i) }
+        }
+    }
+
+    /// Back to the standard delivery process (all progress is cleared).
+    func resetProcess(_ projectID: String) {
+        guard !isRunning(projectID) else { return }
+        update(projectID) { p in
+            p.steps = ProjectFlow.defaultSteps(environments: p.environments.map { $0.name })
+            p.edges = ProjectFlow.chain(p.steps)
+        }
     }
 
     // MARK: Projects
@@ -76,32 +167,41 @@ extension AppModel {
 
     // MARK: Running
 
-    /// Runs the steps in order from `from` (or the first step that is not done). Stops at an approval gate until the
-    /// user decides, and at the first failure.
-    func startProject(_ id: String, from: String? = nil) {
+    /// Runs the process: every step whose incoming edges are decided, one after another. Stops at the first failure.
+    /// Approval gates wait for the user while the rest of the process carries on. `from` re-runs that step and
+    /// everything after it; `all` starts over.
+    func startProject(_ id: String, from: String? = nil, all: Bool = false) {
         guard projectTasks[id] == nil, let project = projects.first(where: { $0.id == id }) else { return }
         prepareFolders(project)
-        let startIndex = from.flatMap { f in project.steps.firstIndex { $0.id == f } }
-            ?? (project.steps.firstIndex { $0.status != .done } ?? project.steps.count)
         update(id) { p in
-            for i in p.steps.indices where i >= startIndex && p.steps[i].status != .waiting {
-                p.steps[i].status = .pending; p.steps[i].error = ""; p.steps[i].summary = ""
+            let reset: Set<String> = all ? Set(p.steps.map { $0.id })
+                : from.map { p.downstream(of: $0) } ?? Set(p.steps.filter { $0.status != .done && $0.status != .waiting }.map { $0.id })
+            for i in p.steps.indices where reset.contains(p.steps[i].id) {
+                p.steps[i].status = .pending; p.steps[i].error = ""; p.steps[i].summary = ""; p.steps[i].badVerdict = false
             }
         }
         let task = Task { @MainActor in
             defer { projectTasks[id] = nil }
-            var i = startIndex
-            while let step = projects.first(where: { $0.id == id })?.steps[safe: i] {
-                if Task.isCancelled { break }
+            while !Task.isCancelled {
+                guard let p = projects.first(where: { $0.id == id }) else { break }
+                let skip = ProjectFlow.toSkip(in: p)
+                if !skip.isEmpty {
+                    for s in skip {
+                        updateStep(id, s) { $0.status = .skipped }
+                        log(id, "\u{21B7} \(p.step(s)?.title ?? s): skipped, its branch was not taken.")
+                    }
+                    continue
+                }
+                guard let next = ProjectFlow.ready(in: p).first, let step = p.step(next) else { break }
                 if step.kind == .approval {
-                    // A gate: wait here for the user. Pressing Approve continues the flow.
+                    // A gate: wait here for the user. Pressing Approve continues the process.
                     updateStep(id, step.id) { $0.status = .waiting }
-                    log(id, "⏸ \(step.title): waiting for your approval.")
-                    return
+                    log(id, "\u{23F8} \(step.title): waiting for your approval.")
+                    continue
                 }
                 guard await runStep(step, projectID: id) else { break }
-                i += 1
             }
+            if projects.first(where: { $0.id == id })?.isFinished == true { log(id, "\u{2605} Project finished.") }
         }
         projectTasks[id] = task
     }
@@ -141,8 +241,10 @@ extension AppModel {
             log(id, "✗ \(step.title): \(message)")
             return false
         }
-        guard let (team, agent) = ProjectFlow.agent(for: step, in: company) else {
-            return fail("No \(step.kind.role?.title ?? "") team with an agent. Use Manage > Set up delivery teams.")
+        let scope = step.agentID != nil ? company : projectCompany(project)
+        guard let (team, agent) = ProjectFlow.agent(for: step, in: scope) else {
+            return fail(step.agentID != nil ? "The agent for this step no longer exists. Pick another in the process."
+                        : "No \(step.role?.title ?? "") team with an agent in this project. Add one under Overview, or use Manage > Set up delivery teams.")
         }
         updateStep(id, step.id) { $0.status = .running; $0.agentName = agent.name }
         personStatus[agent.id] = .working
@@ -152,6 +254,7 @@ extension AppModel {
         let output = step.outputFile.map { project.folderURL.appendingPathComponent($0) }
         if let output { try? FileManager.default.removeItem(at: output) }
         let instruction = ProjectFlow.instruction(for: step, project: project)
+        var bad = false
         do {
             let summary = try await engine.runTask(as: agent, company: company, instruction: instruction,
                                                    directory: project.folderURL, stage: step.id) { [weak self] tool in
@@ -160,14 +263,15 @@ extension AppModel {
             if let output, let file = step.outputFile {
                 let size = (try? FileManager.default.attributesOfItem(atPath: output.path)[.size] as? Int) ?? 0
                 guard size > 0 else { return fail("\(agent.name) finished but did not write \(file).") }
-                if step.kind.stopsOnBadVerdict {
-                    let text = (try? String(contentsOf: output, encoding: .utf8)) ?? ""
-                    if ProjectFlow.verdict(of: text) == .fail { return fail("\(file) reports a failure. Read it, fix the cause and retry.") }
+                let text = (try? String(contentsOf: output, encoding: .utf8)) ?? ""
+                bad = ProjectFlow.verdict(of: text) == .fail
+                let failBranch = project.edges.contains { $0.from == step.id && $0.condition == .fail }
+                if bad && (step.kind.stopsOnBadVerdict || step.kind == .task) && !failBranch {
+                    return fail("\(file) reports a failure. Read it, fix the cause and retry.")
                 }
             }
-            updateStep(id, step.id) { $0.status = .done; $0.summary = summary }
+            updateStep(id, step.id) { $0.status = .done; $0.summary = summary; $0.badVerdict = bad }
             log(id, "✓ \(step.title) done\(step.outputFile.map { ". Written to \($0)" } ?? "")")
-            if projects.first(where: { $0.id == id })?.steps.last?.id == step.id { log(id, "★ Project finished.") }
             return true
         } catch where Task.isCancelled || error is CancellationError {
             updateStep(id, step.id) { $0.status = .pending }

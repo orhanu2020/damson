@@ -40,7 +40,7 @@ struct ProjectsView: View {
                     VStack(spacing: 10) {
                         Image(systemName: "list.bullet.clipboard").font(.system(size: 36)).foregroundStyle(.secondary)
                         Text("No projects yet").font(.headline)
-                        Text("Describe what the business needs. Business Analysis, Project Management and Dev build it; then, with your approval at each gate, Platform, Deployment and Test take it through qa, uat and production.")
+                        Text("Write the high-level requirements, choose the teams and agents, and define the process as a flow. The standard process takes it through requirements, estimate, build and review, then qa, uat and production with your approval at each gate.")
                             .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 420)
                         Button("New project") { showNew = true }.buttonStyle(.borderedProminent)
                     }
@@ -74,9 +74,16 @@ private struct ProjectDetail: View {
     @State private var confirmDelete = false
     @State private var editingEnv: EnvSettings?
     @State private var gateNote = ""
+    @State private var tab = Tab.overview
+    @State private var draftBrief = ""
+
+    enum Tab: String, CaseIterable, Identifiable {
+        case overview = "Overview", process = "Process", progress = "Progress"
+        var id: String { rawValue }
+    }
 
     private var running: Bool { model.isRunning(project.id) }
-    private var missing: [TeamRole] { model.missingTeams() }
+    private var missing: [TeamRole] { model.missingTeams(for: project) }
     private var files: [String] {
         let known = project.steps.compactMap { $0.outputFile } + ["reports/production-release.md"]
         var seen = Set<String>()
@@ -85,21 +92,41 @@ private struct ProjectDetail: View {
     private var needsAction: Bool { project.steps.contains { $0.status == .waiting } }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                header
-                if !missing.isEmpty { missingBanner }
-                environmentsSection
-                VStack(spacing: 8) {
-                    ForEach(Array(project.steps.enumerated()), id: \.element.id) { i, step in stepRow(step, index: i) }
-                }
-                filesSection
-                logSection
+        VStack(alignment: .leading, spacing: 12) {
+            header
+            Picker("", selection: $tab) {
+                ForEach(Tab.allCases) { Text($0.rawValue).tag($0) }
             }
-            .padding(20)
+            .pickerStyle(.segmented).labelsHidden().frame(maxWidth: 360)
+            if !missing.isEmpty { missingBanner }
+            switch tab {
+            case .overview:
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        requirementsSection
+                        teamsSection
+                        environmentsSection
+                    }
+                    .padding(.bottom, 20)
+                }
+            case .process:
+                ProcessEditorView(model: model, project: project)
+            case .progress:
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        VStack(spacing: 8) {
+                            ForEach(Array(project.steps.enumerated()), id: \.element.id) { i, step in stepRow(step, index: i) }
+                        }
+                        filesSection
+                        logSection
+                    }
+                    .padding(.bottom, 20)
+                }
+            }
         }
+        .padding(20)
         .onChange(of: project.steps) { _, _ in reload() }
-        .onAppear { openFile = files.last; reload() }
+        .onAppear { openFile = files.last; reload(); draftBrief = project.brief }
         .sheet(item: $editingEnv) { env in
             EnvironmentSheet(env: env) { model.updateEnvironment(project.id, $0) }
         }
@@ -116,12 +143,12 @@ private struct ProjectDetail: View {
                 if running {
                     Button("Stop") { model.cancelProject(project.id) }
                 } else if project.isFinished {
-                    Button("Run again") { model.startProject(project.id, from: project.steps.first?.id) }
+                    Button("Run again") { model.startProject(project.id, all: true); tab = .progress }
                 } else if !needsAction {
                     Button(project.steps.contains { $0.status == .failed || $0.status == .done } ? "Continue" : "Start") {
-                        model.startProject(project.id)
+                        model.startProject(project.id); tab = .progress
                     }
-                    .buttonStyle(.borderedProminent).disabled(!missing.isEmpty)
+                    .buttonStyle(.borderedProminent).disabled(!missing.isEmpty || project.steps.isEmpty)
                 }
                 Button { NSWorkspace.shared.activateFileViewerSelecting([project.folderURL]) } label: { Image(systemName: "folder") }
                     .help("Show the project folder in Finder")
@@ -129,7 +156,6 @@ private struct ProjectDetail: View {
                     .help("Open the reports folder")
                 Button(role: .destructive) { confirmDelete = true } label: { Image(systemName: "trash") }.disabled(running)
             }
-            Text(project.brief).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
             Text(project.folder).font(.caption2).foregroundStyle(.tertiary).textSelection(.enabled)
         }
     }
@@ -137,12 +163,66 @@ private struct ProjectDetail: View {
     private var missingBanner: some View {
         HStack {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-            Text("Missing team(s): \(missing.map { $0.title }.joined(separator: ", ")).").font(.callout)
+            Text("The process needs team(s) this project does not have: \(missing.map { $0.title }.joined(separator: ", ")).").font(.callout)
             Spacer()
             Button("Set up delivery teams") { model.setupDeliveryTeams() }
         }
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.12)))
+    }
+
+    private var requirementsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("High-level requirements").font(.headline)
+            Text("What the business needs. The business analysis agent turns this into detailed requirements, and the other steps follow from them.")
+                .font(.caption).foregroundStyle(.secondary)
+            TextEditor(text: $draftBrief)
+                .font(.callout).frame(height: 170)
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.stroke))
+                .disabled(running)
+            HStack {
+                Button("Save requirements") { model.setBrief(project.id, draftBrief.trimmingCharacters(in: .whitespacesAndNewlines)) }
+                    .disabled(draftBrief.trimmingCharacters(in: .whitespacesAndNewlines) == project.brief || running)
+                if draftBrief.trimmingCharacters(in: .whitespacesAndNewlines) != project.brief {
+                    Text("Not saved yet").font(.caption).foregroundStyle(.orange)
+                }
+            }
+        }
+    }
+
+    private var teamsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Teams and agents").font(.headline)
+            Text("The teams working on this project. A step goes to the team whose name matches its role; a custom step can also go to one agent.")
+                .font(.caption).foregroundStyle(.secondary)
+            if model.company.teams.isEmpty {
+                Text("There are no teams yet. Create them in Company, or use Set up delivery teams.").font(.caption).foregroundStyle(.secondary)
+            }
+            ForEach(model.company.teams) { team in
+                HStack(alignment: .top) {
+                    Toggle("", isOn: Binding(get: { project.usesTeam(team.id) }, set: { model.setTeam(project.id, team.id, on: $0) }))
+                        .labelsHidden().disabled(running)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(team.name).font(.subheadline.weight(.semibold))
+                        Text(team.members.isEmpty ? "No agents" : team.members.map { $0.name }.joined(separator: ", "))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Theme.card))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.stroke, lineWidth: 1))
+            }
+            let others = model.company.teams.filter { !project.usesTeam($0.id) }.flatMap { $0.members }
+            if !others.isEmpty {
+                Text("Individual agents from other teams").font(.caption.weight(.semibold)).padding(.top, 4)
+                ForEach(others) { person in
+                    Toggle("\(person.name) \u{00B7} \(person.role)", isOn: Binding(get: { project.agentIDs.contains(person.id) },
+                                                                                  set: { model.setAgent(project.id, person.id, on: $0) }))
+                        .font(.caption).disabled(running)
+                }
+            }
+        }
     }
 
     private var environmentsSection: some View {
@@ -176,7 +256,7 @@ private struct ProjectDetail: View {
                 HStack {
                     Image(systemName: step.kind.icon).foregroundStyle(Theme.green)
                     Text(step.title).font(.subheadline.weight(.semibold))
-                    Text("\u{00B7} \(step.kind.role?.title ?? "")\(step.agentName.isEmpty ? "" : " (\(step.agentName))")")
+                    Text("\u{00B7} \(step.role?.title ?? "Custom")\(step.agentName.isEmpty ? "" : " (\(step.agentName))")")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if let f = step.outputFile { Text("Writes \(f)").font(.caption2).foregroundStyle(.tertiary) }
@@ -242,6 +322,7 @@ private struct ProjectDetail: View {
         case .done: Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.onlineGreen)
         case .failed: Image(systemName: "xmark.octagon.fill").foregroundStyle(.red)
         case .rejected: Image(systemName: "hand.raised.slash.fill").foregroundStyle(.red)
+        case .skipped: Image(systemName: "arrow.turn.down.right").foregroundStyle(.secondary)
         }
     }
 
@@ -298,7 +379,7 @@ private struct NewProjectSheet: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("New project").font(.headline)
             TextField("Project name", text: $name)
-            Text("What does the business need? Describe the application, who uses it and why.").font(.caption).foregroundStyle(.secondary)
+            Text("High-level requirements: what does the business need? Describe the application, who uses it and why.").font(.caption).foregroundStyle(.secondary)
             TextEditor(text: $brief)
                 .frame(height: 160)
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.stroke))
@@ -317,7 +398,7 @@ private struct NewProjectSheet: View {
     private func create(start: Bool) {
         let p = model.createProject(name: name.trimmingCharacters(in: .whitespaces), brief: brief.trimmingCharacters(in: .whitespacesAndNewlines))
         onCreate(p)
-        if start && model.missingTeams().isEmpty { model.startProject(p.id) }
+        if start && model.missingTeams(for: p).isEmpty { model.startProject(p.id) }
         dismiss()
     }
 }

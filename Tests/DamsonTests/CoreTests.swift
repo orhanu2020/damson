@@ -78,6 +78,73 @@ final class ProjectFlowTests: XCTestCase {
         Company(name: "X", teams: ["Project Management", "Business Analysis", "Dev", "Platform", "Deployment", "Test"].map(team))
     }
 
+    func testGraphRunsInOrderAndRoutesOnVerdict() {
+        var p = Project(name: "G", brief: "b", folder: "/tmp/g")
+        p.steps = []; p.edges = []
+        let a = p.addStep(kind: .build, at: .zero)
+        let r = p.addStep(kind: .review, at: .zero)
+        let ok = p.addStep(kind: .deploy, env: "qa", at: .zero)
+        let fix = p.addStep(kind: .task, at: .zero)
+        XCTAssertTrue(p.connect(from: a, to: r))
+        XCTAssertTrue(p.connect(from: r, to: ok, condition: .pass))
+        XCTAssertTrue(p.connect(from: r, to: fix, condition: .fail))
+        XCTAssertEqual(ProjectFlow.ready(in: p), [a])
+        p.steps[0].status = .done
+        XCTAssertEqual(ProjectFlow.ready(in: p), [r])
+        p.steps[1].status = .done; p.steps[1].badVerdict = true
+        XCTAssertEqual(ProjectFlow.ready(in: p), [fix])
+        XCTAssertEqual(ProjectFlow.toSkip(in: p), [ok])
+    }
+
+    func testConnectionsCannotLoopOrRepeat() {
+        var p = Project(name: "G", brief: "b", folder: "/tmp/g")
+        p.steps = []; p.edges = []
+        let a = p.addStep(kind: .task, at: .zero), b = p.addStep(kind: .task, at: .zero), c = p.addStep(kind: .task, at: .zero)
+        XCTAssertNotEqual(a, b)
+        XCTAssertTrue(p.connect(from: a, to: b))
+        XCTAssertTrue(p.connect(from: b, to: c))
+        XCTAssertFalse(p.connect(from: c, to: a))
+        XCTAssertFalse(p.connect(from: a, to: b))
+        XCTAssertFalse(p.connect(from: a, to: a))
+        XCTAssertEqual(p.downstream(of: b), [b, c])
+        p.removeStep(b)
+        XCTAssertTrue(p.edges.isEmpty)
+    }
+
+    func testJoinWaitsForAllBranchesAndDefaultProcessIsAChain() {
+        let p = Project(name: "D", brief: "b", folder: "/tmp/d")
+        XCTAssertEqual(p.edges.count, p.steps.count - 1)
+        XCTAssertEqual(ProjectFlow.ready(in: p), ["requirements"])
+        XCTAssertTrue(p.steps.allSatisfy { $0.x > 0 })
+        XCTAssertEqual(p.reportBefore(p.steps.firstIndex { $0.id == "approval-qa" }!), "reports/review-report.md")
+    }
+
+    func testProjectWithoutGraphFieldsStillLoads() throws {
+        let json = """
+        {"id":"1","name":"Old","brief":"b","folder":"/tmp/o","createdAt":"2026-01-01T00:00:00Z",
+         "steps":[{"id":"requirements","kind":"requirements","status":"done"},{"id":"estimate","kind":"estimate","status":"pending"}]}
+        """
+        let d = JSONDecoder(); d.dateDecodingStrategy = .iso8601
+        let p = try d.decode(Project.self, from: Data(json.utf8))
+        XCTAssertEqual(p.edges, [FlowEdge(from: "requirements", to: "estimate")])
+        XCTAssertEqual(ProjectFlow.ready(in: p), ["estimate"])
+        XCTAssertTrue(p.teamIDs.isEmpty && p.usesTeam("any"))
+    }
+
+    func testCustomTaskGoesToChosenAgent() {
+        var c = Company(name: "X", teams: [team("Dev")])
+        c.teams[0].members[0].id = "dev1"
+        var s = FlowStep(kind: .task, id: "task")
+        s.agentID = "dev1"
+        XCTAssertEqual(ProjectFlow.agent(for: s, in: c)?.person.id, "dev1")
+        s.agentID = nil; s.customRole = .dev
+        XCTAssertEqual(ProjectFlow.agent(for: s, in: c)?.team.name, "Dev")
+        s.extra = "Write a haiku"
+        let p = Project(name: "T", brief: "b", folder: "/tmp/t")
+        XCTAssertTrue(ProjectFlow.instruction(for: s, project: p).contains("Write a haiku"))
+        XCTAssertEqual(s.outputFile, "reports/task.md")
+    }
+
     func testFindsTeamsByName() {
         let c = company
         XCTAssertEqual(ProjectFlow.team(for: .projectManagement, in: c)?.name, "Project Management")

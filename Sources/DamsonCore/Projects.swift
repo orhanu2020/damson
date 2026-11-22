@@ -52,13 +52,34 @@ public enum TeamRole: String, Codable, CaseIterable, Sendable, Identifiable {
 
 public enum StepKind: String, Codable, Sendable {
     case requirements, estimate, build, review, approval, provision, deploy, test
+    /// A step the user defines: any team or agent, any instruction.
+    case task
+
+    public static let palette: [StepKind] = [.requirements, .estimate, .build, .review, .approval, .provision, .deploy, .test, .task]
+
+    public var label: String {
+        switch self {
+        case .requirements: return "Requirements"
+        case .estimate: return "Estimates"
+        case .build: return "Development"
+        case .review: return "Code review"
+        case .approval: return "Human approval"
+        case .provision: return "Provision environment"
+        case .deploy: return "Deploy"
+        case .test: return "Test"
+        case .task: return "Custom task"
+        }
+    }
+
+    /// Steps that are about an environment.
+    public var usesEnvironment: Bool { [.approval, .provision, .deploy, .test].contains(self) }
 
     public var role: TeamRole? {
         switch self {
         case .requirements: return .businessAnalysis
         case .estimate: return .projectManagement
         case .build, .review: return .dev
-        case .approval: return nil
+        case .approval, .task: return nil
         case .provision: return .platform
         case .deploy: return .deployment
         case .test: return .test
@@ -75,6 +96,7 @@ public enum StepKind: String, Codable, Sendable {
         case .provision: return "server.rack"
         case .deploy: return "shippingbox.fill"
         case .test: return "checkmark.seal.fill"
+        case .task: return "gearshape.fill"
         }
     }
 
@@ -90,6 +112,8 @@ public enum StepKind: String, Codable, Sendable {
 
 public enum StepStatus: String, Codable, Sendable {
     case pending, running, waiting, done, failed, rejected
+    /// Not run because the branch leading here was not taken.
+    case skipped
 }
 
 public struct FlowStep: Codable, Identifiable, Equatable, Sendable {
@@ -103,24 +127,67 @@ public struct FlowStep: Codable, Identifiable, Equatable, Sendable {
     public var error: String = ""
     /// What the user wrote when deciding a gate.
     public var note: String = ""
+    /// A name the user gave the step (empty: the default title).
+    public var name: String = ""
+    /// Where the step sits on the process canvas.
+    public var x: Double = 0
+    public var y: Double = 0
+    /// For custom tasks: the team that does it, or one specific agent.
+    public var customRole: TeamRole?
+    public var agentID: String?
+    /// More instructions from the user, added to the step's own.
+    public var extra: String = ""
+    /// For custom tasks: the file the result goes to (empty: reports/<id>.md).
+    public var outputName: String = ""
+    /// The report this step wrote says FAILED. Edges marked "on fail" are followed.
+    public var badVerdict: Bool = false
 
-    public init(kind: StepKind, env: String? = nil) {
+    public init(kind: StepKind, env: String? = nil, id: String? = nil) {
         self.kind = kind
         self.env = env
-        self.id = env.map { "\(kind.rawValue)-\($0)" } ?? kind.rawValue
+        self.id = id ?? env.map { "\(kind.rawValue)-\($0)" } ?? kind.rawValue
     }
 
+    enum CodingKeys: String, CodingKey {
+        case id, kind, env, status, agentName, summary, error, note, name, x, y, customRole, agentID, extra, outputName, badVerdict
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        kind = try c.decode(StepKind.self, forKey: .kind)
+        env = try c.decodeIfPresent(String.self, forKey: .env)
+        status = try c.decodeIfPresent(StepStatus.self, forKey: .status) ?? .pending
+        agentName = try c.decodeIfPresent(String.self, forKey: .agentName) ?? ""
+        summary = try c.decodeIfPresent(String.self, forKey: .summary) ?? ""
+        error = try c.decodeIfPresent(String.self, forKey: .error) ?? ""
+        note = try c.decodeIfPresent(String.self, forKey: .note) ?? ""
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
+        x = try c.decodeIfPresent(Double.self, forKey: .x) ?? 0
+        y = try c.decodeIfPresent(Double.self, forKey: .y) ?? 0
+        customRole = try c.decodeIfPresent(TeamRole.self, forKey: .customRole)
+        agentID = try c.decodeIfPresent(String.self, forKey: .agentID)
+        extra = try c.decodeIfPresent(String.self, forKey: .extra) ?? ""
+        outputName = try c.decodeIfPresent(String.self, forKey: .outputName) ?? ""
+        badVerdict = try c.decodeIfPresent(Bool.self, forKey: .badVerdict) ?? false
+    }
+
+    /// The team that does the step (nil for approvals and for tasks given to one agent).
+    public var role: TeamRole? { kind == .task ? customRole : kind.role }
+
     public var title: String {
+        if !name.trimmingCharacters(in: .whitespaces).isEmpty { return name }
         let e = env ?? ""
         switch kind {
         case .requirements: return "Requirements"
         case .estimate: return "Estimates"
         case .build: return "Development"
         case .review: return "Code review"
-        case .approval: return "Approval to move to \(e)"
-        case .provision: return "Provision \(e)"
-        case .deploy: return "Deploy to \(e)"
-        case .test: return "Test in \(e)"
+        case .approval: return e.isEmpty ? "Approval" : "Approval to move to \(e)"
+        case .provision: return e.isEmpty ? "Provision environment" : "Provision \(e)"
+        case .deploy: return e.isEmpty ? "Deploy" : "Deploy to \(e)"
+        case .test: return e.isEmpty ? "Test" : "Test in \(e)"
+        case .task: return "Task"
         }
     }
 
@@ -133,10 +200,33 @@ public struct FlowStep: Codable, Identifiable, Equatable, Sendable {
         case .build: return "handoff/03-build-notice.md"
         case .review: return "reports/review-report.md"
         case .approval: return nil
-        case .provision: return "environments/\(e).md"
-        case .deploy: return "deploy/\(e)-notice.md"
-        case .test: return "reports/\(e)-test-report.md"
+        case .provision: return "environments/\(e.isEmpty ? id : e).md"
+        case .deploy: return "deploy/\(e.isEmpty ? id : e)-notice.md"
+        case .test: return "reports/\(e.isEmpty ? id : e)-test-report.md"
+        case .task: return outputName.trimmingCharacters(in: .whitespaces).isEmpty ? "reports/\(id).md" : outputName
         }
+    }
+}
+
+/// When an edge is followed: after any outcome, only when the step did not report a failure, or only when it did.
+public enum EdgeCondition: String, Codable, CaseIterable, Sendable {
+    case always, pass, fail
+    public var label: String {
+        switch self {
+        case .always: return "Always"
+        case .pass: return "On pass"
+        case .fail: return "On fail"
+        }
+    }
+}
+
+public struct FlowEdge: Codable, Identifiable, Equatable, Sendable {
+    public var from: String
+    public var to: String
+    public var condition: EdgeCondition = .always
+    public var id: String { "\(from)->\(to)" }
+    public init(from: String, to: String, condition: EdgeCondition = .always) {
+        self.from = from; self.to = to; self.condition = condition
     }
 }
 
@@ -230,11 +320,17 @@ public struct EnvSettings: Codable, Equatable, Identifiable, Sendable {
 public struct Project: Codable, Identifiable, Equatable, Sendable {
     public var id: String
     public var name: String
+    /// The high-level requirements the business analysis agent works from.
     public var brief: String
     public var folder: String
     public var createdAt: Date
+    /// The process: steps are the nodes, edges the connections.
     public var steps: [FlowStep]
+    public var edges: [FlowEdge]
     public var environments: [EnvSettings]
+    /// The teams working on this project (empty: all teams) and extra individual agents.
+    public var teamIDs: [String] = []
+    public var agentIDs: [String] = []
 
     public init(id: String = UUID().uuidString, name: String, brief: String, folder: String) {
         self.id = id
@@ -244,11 +340,12 @@ public struct Project: Codable, Identifiable, Equatable, Sendable {
         self.createdAt = Date()
         self.environments = ProjectFlow.environmentNames.map { EnvSettings(name: $0) }
         self.steps = ProjectFlow.defaultSteps(environments: ProjectFlow.environmentNames)
+        self.edges = ProjectFlow.chain(steps)
     }
 
-    enum CodingKeys: String, CodingKey { case id, name, brief, folder, createdAt, steps, environments }
+    enum CodingKeys: String, CodingKey { case id, name, brief, folder, createdAt, steps, edges, environments, teamIDs, agentIDs }
 
-    /// Projects saved by the older four-stage process have no steps; they get the new flow, not started.
+    /// Older projects get the standard process (not started) or, if they have steps but no layout, the steps in a chain.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(String.self, forKey: .id)
@@ -257,16 +354,89 @@ public struct Project: Codable, Identifiable, Equatable, Sendable {
         folder = try c.decode(String.self, forKey: .folder)
         createdAt = try c.decode(Date.self, forKey: .createdAt)
         environments = try c.decodeIfPresent([EnvSettings].self, forKey: .environments) ?? ProjectFlow.environmentNames.map { EnvSettings(name: $0) }
-        steps = try c.decodeIfPresent([FlowStep].self, forKey: .steps) ?? ProjectFlow.defaultSteps(environments: environments.map { $0.name })
+        var loaded = try c.decodeIfPresent([FlowStep].self, forKey: .steps) ?? ProjectFlow.defaultSteps(environments: environments.map { $0.name })
+        if loaded.allSatisfy({ $0.x == 0 && $0.y == 0 }) { ProjectFlow.arrange(&loaded) }
+        steps = loaded
+        edges = try c.decodeIfPresent([FlowEdge].self, forKey: .edges) ?? ProjectFlow.chain(loaded)
+        teamIDs = try c.decodeIfPresent([String].self, forKey: .teamIDs) ?? []
+        agentIDs = try c.decodeIfPresent([String].self, forKey: .agentIDs) ?? []
     }
 
     public var folderURL: URL { URL(fileURLWithPath: folder) }
-    public var isFinished: Bool { steps.allSatisfy { $0.status == .done } }
+    public var isFinished: Bool { !steps.isEmpty && steps.allSatisfy { $0.status == .done || $0.status == .skipped } }
     public func environment(_ name: String) -> EnvSettings { environments.first { $0.name == name } ?? EnvSettings(name: name) }
+    public func step(_ id: String) -> FlowStep? { steps.first { $0.id == id } }
+    public func usesTeam(_ id: String) -> Bool { teamIDs.isEmpty || teamIDs.contains(id) }
 
-    /// The report a gate asks the user to read: the closest earlier review or test report.
+    /// The report a gate asks the user to read: the closest earlier review or test report (following the edges back).
     public func reportBefore(_ index: Int) -> String? {
-        steps[..<index].last(where: { $0.kind == .review || $0.kind == .test })?.outputFile
+        guard steps.indices.contains(index) else { return nil }
+        var seen = Set<String>()
+        var queue = [steps[index].id]
+        while !queue.isEmpty {
+            let id = queue.removeFirst()
+            for e in edges where e.to == id && seen.insert(e.from).inserted {
+                if let s = step(e.from) {
+                    if s.kind == .review || s.kind == .test { return s.outputFile }
+                    queue.append(s.id)
+                }
+            }
+        }
+        return nil
+    }
+
+    // MARK: Editing the process
+
+    /// Adds a step with a unique id at a canvas position and returns its id.
+    @discardableResult
+    public mutating func addStep(kind: StepKind, env: String? = nil, at point: CGPoint) -> String {
+        let environment = kind.usesEnvironment ? (env ?? environments.first?.name) : nil
+        var step = FlowStep(kind: kind, env: environment)
+        var candidate = step.id
+        var n = 2
+        while steps.contains(where: { $0.id == candidate }) { candidate = "\(step.id)-\(n)"; n += 1 }
+        step = FlowStep(kind: kind, env: environment, id: candidate)
+        step.x = Double(point.x)
+        step.y = Double(point.y)
+        steps.append(step)
+        return candidate
+    }
+
+    public mutating func removeStep(_ id: String) {
+        steps.removeAll { $0.id == id }
+        edges.removeAll { $0.from == id || $0.to == id }
+    }
+
+    /// True if connecting `from` to `to` would close a loop (the process must stay a graph without cycles).
+    public func wouldCycle(from: String, to: String) -> Bool {
+        if from == to { return true }
+        var seen = Set<String>()
+        var stack = [to]
+        while let id = stack.popLast() {
+            if id == from { return true }
+            guard seen.insert(id).inserted else { continue }
+            stack += edges.filter { $0.from == id }.map { $0.to }
+        }
+        return false
+    }
+
+    /// Connects two steps. Returns false for a duplicate, a missing step or a loop.
+    @discardableResult
+    public mutating func connect(from: String, to: String, condition: EdgeCondition = .always) -> Bool {
+        guard step(from) != nil, step(to) != nil, !edges.contains(where: { $0.from == from && $0.to == to }),
+              !wouldCycle(from: from, to: to) else { return false }
+        edges.append(FlowEdge(from: from, to: to, condition: condition))
+        return true
+    }
+
+    /// The step and everything after it.
+    public func downstream(of id: String) -> Set<String> {
+        var result: Set<String> = [id]
+        var stack = [id]
+        while let n = stack.popLast() {
+            for e in edges where e.from == n && result.insert(e.to).inserted { stack.append(e.to) }
+        }
+        return result
     }
 }
 
@@ -286,7 +456,64 @@ public enum ProjectFlow {
             steps += [FlowStep(kind: .approval, env: env), FlowStep(kind: .provision, env: env), FlowStep(kind: .deploy, env: env)]
             if i < environments.count - 1 { steps.append(FlowStep(kind: .test, env: env)) }
         }
+        arrange(&steps)
         return steps
+    }
+
+    public static let columnWidth = 220.0
+    public static let rowHeight = 120.0
+
+    /// Lays steps out in rows of four, in order.
+    public static func arrange(_ steps: inout [FlowStep]) {
+        // The first row holds the four build steps; every environment starts a new row.
+        var row = 0, col = 0
+        var lastEnv: String?
+        for i in steps.indices {
+            let env = steps[i].env
+            if i > 0 && (col >= 4 || (env != nil && env != lastEnv && steps[i].kind == .approval)) { row += 1; col = 0 }
+            steps[i].x = 40 + Double(col) * columnWidth
+            steps[i].y = 40 + Double(row) * rowHeight
+            col += 1
+            if env != nil { lastEnv = env }
+        }
+    }
+
+    /// The steps in a line, each followed by the next.
+    public static func chain(_ steps: [FlowStep]) -> [FlowEdge] {
+        zip(steps, steps.dropFirst()).map { FlowEdge(from: $0.id, to: $1.id) }
+    }
+
+    private enum EdgeState { case open, dead, unresolved, blocked }
+
+    private static func state(of edge: FlowEdge, in project: Project) -> EdgeState {
+        guard let source = project.step(edge.from) else { return .dead }
+        switch source.status {
+        case .done:
+            let taken = edge.condition == .always || (edge.condition == .pass) == !source.badVerdict
+            return taken ? .open : .dead
+        case .skipped: return .dead
+        case .failed, .rejected: return .blocked
+        case .pending, .running, .waiting: return .unresolved
+        }
+    }
+
+    /// Pending steps that can run now: no incoming edge, or all incoming edges decided and at least one taken.
+    public static func ready(in project: Project) -> [String] {
+        project.steps.filter { step in
+            guard step.status == .pending else { return false }
+            let states = project.edges.filter { $0.to == step.id }.map { state(of: $0, in: project) }
+            if states.isEmpty { return true }
+            return !states.contains(.blocked) && !states.contains(.unresolved) && states.contains(.open)
+        }.map { $0.id }
+    }
+
+    /// Pending steps that will never run because every branch leading to them was not taken.
+    public static func toSkip(in project: Project) -> [String] {
+        project.steps.filter { step in
+            guard step.status == .pending else { return false }
+            let states = project.edges.filter { $0.to == step.id }.map { state(of: $0, in: project) }
+            return !states.isEmpty && states.allSatisfy { $0 == .dead }
+        }.map { $0.id }
     }
 
     /// The team for a role, found by name.
@@ -301,7 +528,11 @@ public enum ProjectFlow {
 
     /// The agent that does a step. Review is done by a different Dev agent than the build when there is one.
     public static func agent(for step: FlowStep, in company: Company) -> (team: Team, person: Person)? {
-        guard let role = step.kind.role, let team = team(for: role, in: company), !team.members.isEmpty else { return nil }
+        if let id = step.agentID {
+            for team in company.teams { if let person = team.members.first(where: { $0.id == id }) { return (team, person) } }
+            return nil
+        }
+        guard let role = step.role, let team = team(for: role, in: company), !team.members.isEmpty else { return nil }
         let person = (step.kind == .review && team.members.count > 1) ? team.members[1] : team.members[0]
         return (team, person)
     }
@@ -341,6 +572,13 @@ public enum ProjectFlow {
 
     /// What the agent is told to do for a step. Everything it needs comes from files, not from another team's chat.
     public static func instruction(for step: FlowStep, project: Project) -> String {
+        let base = baseInstruction(for: step, project: project)
+        let extra = step.extra.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !extra.isEmpty, step.kind != .task, step.kind != .approval else { return base }
+        return base + "\n\nADDITIONAL INSTRUCTIONS FROM THE USER:\n" + extra
+    }
+
+    private static func baseInstruction(for step: FlowStep, project: Project) -> String {
         let h = header(project)
         let e = step.env ?? ""
         let env = project.environment(e)
@@ -379,6 +617,15 @@ public enum ProjectFlow {
             """
         case .approval:
             return ""
+        case .task:
+            let file = step.outputFile ?? "reports/\(step.id).md"
+            let extra = step.extra.trimmingCharacters(in: .whitespacesAndNewlines)
+            return h + """
+            YOUR TASK: \(step.title).
+            \(extra.isEmpty ? "No further instructions were given: do what the title says, using the files in the project folder." : extra)
+            Earlier steps leave their results in handoff/, reports/, environments/ and deploy/; read what you need.
+            Write your result to \(file). If your task is a check that can fail, end the file with a last line exactly like "Verdict: PASS" or "Verdict: FAIL".
+            """
         case .provision:
             return h + envBlock + """
             YOUR ROLE: platform engineering. Make sure the \(e) environment exists and is ready to receive the application. If it already exists, check it and change nothing that works. Do not deploy the application: Deployment does that.
