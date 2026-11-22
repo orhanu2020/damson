@@ -43,48 +43,6 @@ public struct Person: Identifiable, Codable, Equatable, Sendable {
     }
 }
 
-/// A starter skill. Seeded as a real SKILL.md (see SkillStore); also the shape of skills from older company files.
-public struct Skill: Identifiable, Codable, Equatable, Sendable {
-    public var name: String
-    public var instructions: String
-    public var id: String { name }
-
-    public init(name: String, instructions: String) {
-        self.name = name
-        self.instructions = instructions
-    }
-
-    /// The "when to use" line Claude reads to decide whether to load the skill.
-    public var description: String {
-        let first = instructions.split(separator: ".").first.map(String.init) ?? instructions
-        return "Use when the work calls for \(name.lowercased()). \(first)."
-    }
-
-    public static let builtins: [Skill] = [
-        Skill(name: "Software development", instructions: "Design and reason about code carefully. Prefer simple, tested solutions; explain trade-offs and show short code sketches in words."),
-        Skill(name: "Backend & APIs", instructions: "Think in terms of data models, API contracts, error handling, security and scaling when advising on server-side work."),
-        Skill(name: "Mobile apps", instructions: "Advise on iOS and Android app design, platform conventions, performance and release practice."),
-        Skill(name: "Testing & QA", instructions: "Look for edge cases and failure modes first. Propose concrete test cases and how to verify a fix."),
-        Skill(name: "UI design", instructions: "Judge layout, hierarchy, typography, color and consistency. Give specific, actionable visual feedback."),
-        Skill(name: "UX research", instructions: "Frame questions about users: goals, pain points, interviews and usability tests. Distinguish evidence from assumption."),
-        Skill(name: "Marketing strategy", instructions: "Reason about audience, positioning, channels and measurable goals. Prefer concrete campaign ideas over generalities."),
-        Skill(name: "Copywriting", instructions: "Write clear, persuasive copy in the requested tone. Offer a few variants when asked for a draft."),
-        Skill(name: "Social media", instructions: "Suggest platform-appropriate posts, timing and engagement ideas; keep a consistent brand voice."),
-        Skill(name: "Data analysis", instructions: "Ask what decision the numbers serve, suggest the right metrics and checks, and state the limits of the data."),
-        Skill(name: "Project management", instructions: "Break work into steps, owners, risks and deadlines. Keep plans short and realistic."),
-        Skill(name: "Finance & budgeting", instructions: "Reason about budgets, costs and trade-offs with clear arithmetic. You are not a licensed financial adviser."),
-        Skill(name: "Legal & compliance", instructions: "Point out common legal and compliance concerns in plain language. You are not a lawyer; recommend professional review for real decisions."),
-        Skill(name: "Customer support", instructions: "Respond with empathy, find the root cause, and give clear next steps."),
-        Skill(name: "Sales", instructions: "Focus on customer needs, objections and next steps; suggest concise outreach and follow-up."),
-        Skill(name: "Research & summarizing", instructions: "Summarize material faithfully and briefly, separate facts from opinion, and flag what is unknown."),
-        Skill(name: "Requirements analysis", instructions: "Turn a business brief into precise, numbered, testable requirements with acceptance criteria. State assumptions instead of leaving gaps."),
-        Skill(name: "Time & effort estimation", instructions: "Break work into items, estimate effort in person-days with ranges, list resources, milestones and risks, and state your confidence honestly."),
-        Skill(name: "Test automation", instructions: "Write runnable automated tests tied to requirements, run them for real, and report only actual results with reproducible defects."),
-        Skill(name: "Deployment & DevOps", instructions: "Build, package and deploy applications to a test environment reliably, and document how to reach and run them."),
-        Skill(name: "Translation", instructions: "Translate accurately between Turkish and English (and other languages on request), keeping tone and meaning."),
-    ]
-}
-
 public struct Team: Identifiable, Codable, Equatable, Sendable {
     public var id: String
     public var name: String
@@ -100,31 +58,9 @@ public struct Team: Identifiable, Codable, Equatable, Sendable {
 public struct Company: Codable, Equatable, Sendable {
     public var name: String
     public var teams: [Team]
-    /// Skills stored inside older company files. Read once so they can be moved to SKILL.md folders; never written back.
-    public var legacySkills: [Skill] = []
-
     public init(name: String, teams: [Team]) {
         self.name = name
         self.teams = teams
-    }
-
-    enum CodingKeys: String, CodingKey { case name, teams, skillLibrary }
-
-    public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        name = try c.decode(String.self, forKey: .name)
-        teams = try c.decode([Team].self, forKey: .teams)
-        legacySkills = try c.decodeIfPresent([Skill].self, forKey: .skillLibrary) ?? []
-        // Skills are named like Claude skills now (lowercase-with-hyphens).
-        for t in teams.indices { for m in teams[t].members.indices {
-            teams[t].members[m].skills = teams[t].members[m].skills.map { SkillStore.slug($0) }
-        } }
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encode(name, forKey: .name)
-        try c.encode(teams, forKey: .teams)
     }
 
     public var allPeople: [Person] { teams.flatMap { $0.members } }

@@ -8,7 +8,6 @@ enum CompanySheet: Identifiable {
     case renameTeam(Team)
     case newAgent(teamID: String)
     case editAgent(Person, teamID: String)
-    case skills
 
     var id: String {
         switch self {
@@ -16,7 +15,6 @@ enum CompanySheet: Identifiable {
         case .renameTeam(let t): return "rename-\(t.id)"
         case .newAgent(let id): return "new-\(id)"
         case .editAgent(let p, _): return "edit-\(p.id)"
-        case .skills: return "skills"
         }
     }
 }
@@ -37,8 +35,6 @@ struct CompanySheets: ViewModifier {
                     AgentSheet(model: model, person: nil, teamID: teamID)
                 case .editAgent(let person, let teamID):
                     AgentSheet(model: model, person: person, teamID: teamID)
-                case .skills:
-                    SkillsLibrarySheet(model: model)
                 }
             }
             .confirmationDialog("Delete team \(model.teamToDelete?.name ?? "")?",
@@ -54,7 +50,7 @@ struct CompanySheets: ViewModifier {
     }
 }
 
-/// The "Manage" menu in the Company header: teams, agents and skills.
+/// The "Manage" menu in the Company header: teams and agents.
 struct CompanyMenu: View {
     @ObservedObject var model: AppModel
 
@@ -73,13 +69,13 @@ struct CompanyMenu: View {
             Divider()
             Button("Set up delivery teams") { model.setupDeliveryTeams() }
                 .help("Adds Business Analysis, Project Management, Dev and Test teams that are missing")
-            Button("Skills library\u{2026}") { model.companySheet = .skills }
+
         } label: {
             Label("Manage", systemImage: "slider.horizontal.3")
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .help("Create or delete teams and agents, and edit skills")
+        .help("Create or delete teams and agents")
     }
 }
 
@@ -101,48 +97,6 @@ struct AgentContextMenu: View {
             Divider()
             Button("Delete agent", role: .destructive) { model.deletePerson(person.id) }
         }
-    }
-}
-
-private struct SkillsLibrarySheet: View {
-    @Environment(\.dismiss) private var dismiss
-    @ObservedObject var model: AppModel
-    @State private var editing: SkillEdit?
-
-    private struct SkillEdit: Identifiable { let skill: SkillInfo?; var id: String { skill?.name ?? "new" } }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Skills library").font(.headline)
-                Spacer()
-                Button { editing = SkillEdit(skill: nil) } label: { Label("New skill", systemImage: "plus") }
-            }
-            Text("Claude Agent Skills (SKILL.md folders). Yours live in Damson's skills folder; skills from ~/.claude/skills are listed too. Assign them in an agent's settings.")
-                .font(.caption).foregroundStyle(.secondary)
-            List {
-                ForEach(model.skills) { skill in
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack(spacing: 6) {
-                                Text(skill.name)
-                                if !skill.isEditable { Text("Claude").font(.caption2).padding(.horizontal, 5).background(Capsule().fill(Theme.chip)) }
-                            }
-                            Text(skill.description).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                        }
-                        Spacer()
-                        if skill.isEditable {
-                            Button { editing = SkillEdit(skill: skill) } label: { Image(systemName: "pencil") }.buttonStyle(.borderless)
-                            Button(role: .destructive) { model.deleteSkill(skill.name) } label: { Image(systemName: "trash") }.buttonStyle(.borderless)
-                        }
-                    }
-                }
-            }
-            .frame(height: 320)
-            HStack { Spacer(); Button("Done") { dismiss() }.keyboardShortcut(.defaultAction) }
-        }
-        .padding(20).frame(width: 520)
-        .sheet(item: $editing) { SkillSheet(model: model, skill: $0.skill) }
     }
 }
 
@@ -218,8 +172,12 @@ struct AgentSheet: View {
                 ForEach(ClaudeCodeProvider.knownModels, id: \.self) { Text($0).tag($0) }
             }
             Text("Claude models run through the Claude Code app signed in with your Claude subscription, not the API.").font(.caption2).foregroundStyle(.secondary)
-            Text("Skills").font(.subheadline.weight(.semibold))
-            TextField("Filter skills", text: $skillFilter).textFieldStyle(.roundedBorder)
+            Text("Skills (from your Claude skills)").font(.subheadline.weight(.semibold))
+            if model.skills.isEmpty {
+                Text("No skills found in ~/.claude/skills.").font(.caption).foregroundStyle(.secondary)
+            } else {
+                TextField("Filter skills", text: $skillFilter).textFieldStyle(.roundedBorder)
+            }
             ScrollView {
               FlowLayout(spacing: 6) {
                 ForEach(options, id: \.self) { skill in
@@ -276,51 +234,5 @@ struct AgentSheet: View {
             model.addPerson(Person(id: id, name: n, role: r, skills: skills, model: agentModel.isEmpty ? nil : agentModel, disabledTools: disabledTools.sorted()), to: teamID)
         }
         dismiss()
-    }
-}
-
-struct SkillSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    @ObservedObject var model: AppModel
-    let original: String?
-    @State private var name: String
-    @State private var description: String
-    @State private var instructions: String
-
-    init(model: AppModel, skill: SkillInfo?) {
-        self.model = model
-        original = skill?.name
-        _name = State(initialValue: skill?.name ?? "")
-        _description = State(initialValue: skill?.description ?? "")
-        _instructions = State(initialValue: skill?.body ?? "")
-    }
-
-    private var clash: Bool {
-        let n = SkillStore.slug(name)
-        return n != original && model.skills.contains { $0.name == n }
-    }
-    private var valid: Bool { !name.trimmingCharacters(in: .whitespaces).isEmpty && !description.trimmingCharacters(in: .whitespaces).isEmpty && !instructions.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !clash }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text(original == nil ? "New skill" : "Edit skill").font(.headline)
-            TextField("Skill name (lowercase-with-hyphens)", text: $name)
-            TextField("When should it be used? (Claude reads this to decide)", text: $description)
-            if clash { Text("A skill with this name already exists.").font(.caption).foregroundStyle(.orange) }
-            Text("Instructions the agent follows when it uses this skill").font(.caption).foregroundStyle(.secondary)
-            TextEditor(text: $instructions)
-                .frame(height: 130)
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.stroke))
-            HStack {
-                Spacer()
-                Button("Cancel") { dismiss() }
-                Button("Save") {
-                    model.saveSkill(name: name, description: description, instructions: instructions, replacing: original)
-                    dismiss()
-                }
-                .keyboardShortcut(.defaultAction).disabled(!valid)
-            }
-        }
-        .padding(20).frame(width: 440)
     }
 }

@@ -32,7 +32,7 @@ public final class AppModel: ObservableObject {
     @Published public var company: Company = Company.load() ?? .sample {
         didSet { company.save() }
     }
-    /// Claude skills (SKILL.md folders) from Damson's folder and ~/.claude/skills.
+    /// The user's Claude skills (~/.claude/skills), read-only.
     @Published public var skills: [SkillInfo] = []
     @Published public var selectedPeople: Set<String> = []
     @Published public var personStatus: [String: PersonStatus] = [:]
@@ -88,13 +88,14 @@ public final class AppModel: ObservableObject {
         self.voice = VoiceController(status: status)
         self.notice = startupNotice
 
-        // Skills are SKILL.md folders. Seed the starters and move skills from older company files over once.
-        SkillStore.seedBuiltins()
-        for legacy in company.legacySkills where !Skill.builtins.contains(where: { $0.name == legacy.name }) {
-            _ = try? SkillStore.save(name: legacy.name, description: legacy.description, body: legacy.instructions)
-        }
-        if !company.legacySkills.isEmpty { company.legacySkills = []; company.save() }
         reloadSkills()
+        // Drop assigned skills that do not exist among the user's Claude skills (e.g. from older versions).
+        if !skills.isEmpty {
+            let known = Set(skills.map { $0.name })
+            for t in company.teams.indices { for m in company.teams[t].members.indices {
+                company.teams[t].members[m].skills.removeAll { !known.contains($0) }
+            } }
+        }
 
         Task { await self.start() }
     }
