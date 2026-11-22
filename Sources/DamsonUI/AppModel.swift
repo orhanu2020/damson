@@ -32,13 +32,32 @@ public final class AppModel: ObservableObject {
     @Published public var company: Company = Company.load() ?? .sample {
         didSet { company.save() }
     }
-    /// The user's Claude skills (~/.claude/skills), read-only.
+    /// The user's Claude skills (~/.claude/skills) and installed plugins' skills, read-only.
     @Published public var skills: [SkillInfo] = []
     @Published public var selectedPeople: Set<String> = []
     @Published public var personStatus: [String: PersonStatus] = [:]
     /// Direct chats with people, by person id.
     // Projects (the delivery process)
-    @Published var projects: [Project] = ProjectStore.load() { didSet { ProjectStore.save(projects) } }
+    @Published var projects: [Project] = ProjectStore.load() {
+        didSet {
+            guard !reloadingProjects else { return }
+            ProjectStore.save(projects)
+            projectsStamp = ProjectStore.modificationDate
+        }
+    }
+    private var reloadingProjects = false
+    private var projectsStamp: Date? = ProjectStore.modificationDate
+
+    /// Picks up changes another process made to projects.json (for example a headless run), unless this app is running a project itself.
+    func syncProjectsFromDisk() {
+        guard projectTasks.isEmpty, let stamp = ProjectStore.modificationDate, stamp != projectsStamp else { return }
+        projectsStamp = stamp
+        let loaded = ProjectStore.load()
+        guard loaded != projects else { return }
+        reloadingProjects = true
+        projects = loaded
+        reloadingProjects = false
+    }
     @Published var projectLog: [String: [String]] = [:]
     var projectTasks: [String: Task<Void, Never>] = [:]
     @Published var companySheet: CompanySheet?
@@ -91,7 +110,7 @@ public final class AppModel: ObservableObject {
         reloadSkills()
         // Drop assigned skills that do not exist among the user's Claude skills (e.g. from older versions).
         if !skills.isEmpty {
-            let known = Set(skills.map { $0.name })
+            let known = Set(skills.map { $0.id })
             for t in company.teams.indices { for m in company.teams[t].members.indices {
                 company.teams[t].members[m].skills.removeAll { !known.contains($0) }
             } }
@@ -105,6 +124,10 @@ public final class AppModel: ObservableObject {
     private func start() async {
         guard !started else { return }
         started = true
+
+        Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()
+            .sink { [weak self] _ in self?.syncProjectsFromDisk() }
+            .store(in: &cancellables)
 
         let stream = engine.bus.subscribe()
         Task { [weak self] in
@@ -199,6 +222,12 @@ public final class AppModel: ObservableObject {
     }
 
     // MARK: Voice
+
+    /// Mutes or unmutes Damson's spoken replies. Muting also cuts off whatever is being said right now.
+    public func toggleSpeech() {
+        settings.voiceOutputEnabled.toggle()
+        if !settings.voiceOutputEnabled { voice.stopSpeaking() }
+    }
 
     /// "Start listening" opens a hands-free conversation right away.
     public func toggleListening() {

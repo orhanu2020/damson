@@ -124,6 +124,15 @@ public struct RootView: View {
                 }
             }
             .onChange(of: selection) { _, new in applySelection(new) }
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Button { model.toggleSpeech() } label: {
+                        Image(systemName: model.settings.voiceOutputEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill")
+                            .foregroundStyle(model.settings.voiceOutputEnabled ? Theme.green : Color.orange)
+                    }
+                    .help(model.settings.voiceOutputEnabled ? "Damson speaks aloud. Click to mute." : "Damson is muted. Click to let it speak.")
+                }
+            }
         }
         .modifier(CompanySheets(model: model))
         .frame(minWidth: 980, minHeight: 620)

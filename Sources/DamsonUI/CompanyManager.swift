@@ -149,20 +149,15 @@ struct AgentSheet: View {
         _disabledTools = State(initialValue: Set(person?.disabledTools ?? []))
     }
 
-    @State private var skillFilter = ""
-    private var options: [String] {
-        let q = skillFilter.lowercased()
-        let names = model.skills.map { $0.name }
-        // Always show the ones already assigned, even when filtered out or missing from disk.
-        let shown = names.filter { q.isEmpty || $0.contains(q) }
-        return Array(Set(shown).union(skills)).sorted()
-    }
+    private enum PickerKind: String, Identifiable { case skills, tools; var id: String { rawValue } }
+    @State private var picker: PickerKind?
+
     private var valid: Bool { !name.trimmingCharacters(in: .whitespaces).isEmpty && !role.trimmingCharacters(in: .whitespaces).isEmpty }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text(person == nil ? "New agent" : "Edit agent").font(.headline)
-            TextField("Name (e.g. Ayşe Kaya)", text: $name)
+            TextField("Name (e.g. Alex Morgan)", text: $name)
             TextField("Role (e.g. Backend Developer)", text: $role)
             Picker("Team", selection: $teamID) {
                 ForEach(model.company.teams) { Text($0.name).tag($0.id) }
@@ -172,48 +167,13 @@ struct AgentSheet: View {
                 ForEach(ClaudeCodeProvider.knownModels, id: \.self) { Text($0).tag($0) }
             }
             Text("Claude models run through the Claude Code app signed in with your Claude subscription, not the API.").font(.caption2).foregroundStyle(.secondary)
-            Text("Skills (from your Claude skills)").font(.subheadline.weight(.semibold))
-            if model.skills.isEmpty {
-                Text("No skills found in ~/.claude/skills.").font(.caption).foregroundStyle(.secondary)
-            } else {
-                TextField("Filter skills", text: $skillFilter).textFieldStyle(.roundedBorder)
-            }
-            ScrollView {
-              FlowLayout(spacing: 6) {
-                ForEach(options, id: \.self) { skill in
-                    let on = skills.contains(skill)
-                    Button {
-                        if on { skills.removeAll { $0 == skill } } else { skills.append(skill) }
-                    } label: {
-                        Text(skill).font(.caption)
-                            .padding(.horizontal, 10).padding(.vertical, 5)
-                            .foregroundStyle(on ? Color.white : Theme.green)
-                            .background(Capsule().fill(on ? Theme.green : Color.clear))
-                            .overlay(Capsule().stroke(Theme.green.opacity(0.6), lineWidth: 1))
-                    }
-                    .buttonStyle(.plain)
-                }
-              }
-            }
-            .frame(maxHeight: 110)
-            Text("Tools").font(.subheadline.weight(.semibold))
-            FlowLayout(spacing: 6) {
-                ForEach(model.engine.tools.specs, id: \.name) { spec in
-                    let on = !disabledTools.contains(spec.name)
-                    Button {
-                        if on { disabledTools.insert(spec.name) } else { disabledTools.remove(spec.name) }
-                    } label: {
-                        Text(spec.name).font(.caption)
-                            .padding(.horizontal, 10).padding(.vertical, 5)
-                            .foregroundStyle(on ? Color.white : Theme.green)
-                            .background(Capsule().fill(on ? Theme.green : Color.clear))
-                            .overlay(Capsule().stroke(Theme.green.opacity(0.6), lineWidth: 1))
-                    }
-                    .buttonStyle(.plain)
-                    .help(spec.description)
+            HStack(spacing: 10) {
+                Button { picker = .skills } label: { Label("Skills (\(skills.count))\u{2026}", systemImage: "sparkles") }
+                Button { picker = .tools } label: {
+                    Label("Tools (\(model.engine.tools.specs.count - disabledTools.count) of \(model.engine.tools.specs.count))\u{2026}", systemImage: "wrench.and.screwdriver")
                 }
             }
-            Text("Anything that changes your Mac or an account still asks for your approval.").font(.caption2).foregroundStyle(.secondary)
+            Text("Skills come from your Claude skills and installed plugins. Anything that changes your Mac or an account still asks for your approval.").font(.caption2).foregroundStyle(.secondary)
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }
@@ -221,6 +181,25 @@ struct AgentSheet: View {
             }
         }
         .padding(20).frame(width: 460)
+        .sheet(item: $picker) { which in
+            switch which {
+            case .skills:
+                ItemPickerSheet(title: "Skills", note: model.skills.isEmpty ? "No skills found (~/.claude/skills or installed plugins)." : "Your Claude skills. Selected ones are available to this agent.",
+                                items: skillItems, selected: Binding(get: { Set(skills) }, set: { skills = Array($0).sorted() }))
+            case .tools:
+                ItemPickerSheet(title: "Tools", note: "Selected tools are available to this agent.",
+                                items: model.engine.tools.specs.map { PickItem(id: $0.name, detail: $0.description) },
+                                selected: Binding(get: { Set(model.engine.tools.specs.map { $0.name }).subtracting(disabledTools) },
+                                                  set: { disabledTools = Set(model.engine.tools.specs.map { $0.name }).subtracting($0) }))
+            }
+        }
+    }
+
+    /// Skills on disk, plus any already assigned that are missing from disk so they can be removed.
+    private var skillItems: [PickItem] {
+        var items = model.skills.map { PickItem(id: $0.id, detail: $0.description) }
+        for n in skills where !items.contains(where: { $0.id == n }) { items.append(PickItem(id: n, detail: "Not found any more")) }
+        return items
     }
 
     private func save() {
@@ -234,5 +213,60 @@ struct AgentSheet: View {
             model.addPerson(Person(id: id, name: n, role: r, skills: skills, model: agentModel.isEmpty ? nil : agentModel, disabledTools: disabledTools.sorted()), to: teamID)
         }
         dismiss()
+    }
+}
+
+struct PickItem: Identifiable { let id: String; let detail: String }
+
+/// A list of items, one per line with a checkbox, ten visible at a time and a scrollbar for the rest.
+struct ItemPickerSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let title: String
+    let note: String
+    let items: [PickItem]
+    @Binding var selected: Set<String>
+    @State private var filter = ""
+
+    private var shown: [PickItem] {
+        let q = filter.lowercased()
+        return q.isEmpty ? items : items.filter { $0.id.lowercased().contains(q) || $0.detail.lowercased().contains(q) }
+    }
+    private let rowHeight: CGFloat = 38
+
+    var body: some View {
+        let rows = CGFloat(min(max(shown.count, 1), 10))
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text(title).font(.headline)
+                Text("\(selected.count) of \(items.count) selected").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("All") { selected.formUnion(shown.map { $0.id }) }.disabled(shown.isEmpty)
+                Button("None") { selected.subtract(shown.map { $0.id }) }.disabled(shown.isEmpty)
+            }
+            Text(note).font(.caption).foregroundStyle(.secondary)
+            if items.count > 10 { TextField("Filter", text: $filter).textFieldStyle(.roundedBorder) }
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(shown) { item in
+                        Toggle(isOn: Binding(get: { selected.contains(item.id) },
+                                             set: { if $0 { selected.insert(item.id) } else { selected.remove(item.id) } })) {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(item.id).lineLimit(1)
+                                Text(item.detail).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                        }
+                        .toggleStyle(.checkbox)
+                        .frame(height: rowHeight - 1, alignment: .leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        Divider()
+                    }
+                }
+                .padding(.horizontal, 8)
+            }
+            .frame(height: rowHeight * rows)
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.stroke))
+            HStack { Spacer(); Button("Done") { dismiss() }.keyboardShortcut(.defaultAction) }
+        }
+        .padding(20).frame(width: 460)
     }
 }

@@ -66,7 +66,7 @@ public struct Company: Codable, Equatable, Sendable {
     public var allPeople: [Person] { teams.flatMap { $0.members } }
 
     /// Limits so the office stays readable.
-    public static let maxTeams = 8
+    public static let maxTeams = 10
     public static let maxMembers = 12
 
     static var fileURL: URL {
@@ -87,20 +87,20 @@ public struct Company: Codable, Equatable, Sendable {
 
     public static let sample = Company(name: "Damson Inc.", teams: [
         Team(id: "software", name: "Software", members: [
-            Person(id: "ayse", name: "Ayşe Kaya", role: "Team Lead"),
-            Person(id: "mehmet", name: "Mehmet Demir", role: "Backend Developer"),
-            Person(id: "zeynep", name: "Zeynep Arslan", role: "Mobile Developer"),
-            Person(id: "can", name: "Can Yıldız", role: "Test Engineer"),
+            Person(id: "anna", name: "Anna Miller", role: "Team Lead"),
+            Person(id: "mark", name: "Mark Davis", role: "Backend Developer"),
+            Person(id: "zoe", name: "Zoe Adams", role: "Mobile Developer"),
+            Person(id: "chris", name: "Chris Young", role: "Test Engineer"),
         ]),
         Team(id: "design", name: "Design", members: [
-            Person(id: "elif", name: "Elif Şahin", role: "Design Director"),
-            Person(id: "burak", name: "Burak Aydın", role: "UI Designer"),
-            Person(id: "selin", name: "Selin Çelik", role: "UX Researcher"),
+            Person(id: "ella", name: "Ella Stone", role: "Design Director"),
+            Person(id: "ben", name: "Ben Hall", role: "UI Designer"),
+            Person(id: "sam", name: "Sam Lee", role: "UX Researcher"),
         ]),
         Team(id: "marketing", name: "Marketing", members: [
-            Person(id: "deniz", name: "Deniz Koç", role: "Marketing Director"),
-            Person(id: "ahmet", name: "Ahmet Polat", role: "Content Writer"),
-            Person(id: "ece", name: "Ece Güneş", role: "Social Media Specialist"),
+            Person(id: "dana", name: "Dana Cole", role: "Marketing Director"),
+            Person(id: "adam", name: "Adam Price", role: "Content Writer"),
+            Person(id: "grace", name: "Grace Evans", role: "Social Media Specialist"),
         ]),
     ])
 }

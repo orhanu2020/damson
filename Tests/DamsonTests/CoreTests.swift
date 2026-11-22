@@ -73,21 +73,89 @@ final class EngineLogicTests: XCTestCase {
 }
 
 final class ProjectFlowTests: XCTestCase {
-    func testFindsTeamsByName() {
-        func team(_ n: String) -> Team { Team(id: n, name: n, members: []) }
-        let c = Company(name: "X", teams: [team("Project Management"), team("Business Analysis"), team("Dev"), team("Test")])
-        XCTAssertEqual(ProjectFlow.team(for: .estimate, in: c)?.name, "Project Management")
-        XCTAssertEqual(ProjectFlow.team(for: .requirements, in: c)?.name, "Business Analysis")
-        XCTAssertEqual(ProjectFlow.team(for: .development, in: c)?.name, "Dev")
-        XCTAssertEqual(ProjectFlow.team(for: .testing, in: c)?.name, "Test")
-        XCTAssertNil(ProjectFlow.team(for: .testing, in: Company(name: "X", teams: [team("Design")])))
+    private func team(_ n: String) -> Team { Team(id: n, name: n, members: [Person(id: n + "1", name: n + " A", role: "r"), Person(id: n + "2", name: n + " B", role: "r")]) }
+    private var company: Company {
+        Company(name: "X", teams: ["Project Management", "Business Analysis", "Dev", "Platform", "Deployment", "Test"].map(team))
     }
 
-    func testSlugAndHandoffFiles() {
-        XCTAssertEqual(ProjectFlow.slug("Müşteri Portalı 2"), "musteri-portali-2")
-        XCTAssertEqual(StageKind.allCases.map { $0.outputFile }.count, Set(StageKind.allCases.map { $0.outputFile }).count)
+    func testFindsTeamsByName() {
+        let c = company
+        XCTAssertEqual(ProjectFlow.team(for: .projectManagement, in: c)?.name, "Project Management")
+        XCTAssertEqual(ProjectFlow.team(for: .businessAnalysis, in: c)?.name, "Business Analysis")
+        XCTAssertEqual(ProjectFlow.team(for: .dev, in: c)?.name, "Dev")
+        XCTAssertEqual(ProjectFlow.team(for: .platform, in: c)?.name, "Platform")
+        XCTAssertEqual(ProjectFlow.team(for: .deployment, in: c)?.name, "Deployment")
+        XCTAssertEqual(ProjectFlow.team(for: .test, in: c)?.name, "Test")
+        XCTAssertNil(ProjectFlow.team(for: .test, in: Company(name: "X", teams: [team("Design")])))
+        // "DevOps" is a platform team, not the dev team.
+        let ops = Company(name: "X", teams: [team("DevOps"), team("Dev")])
+        XCTAssertEqual(ProjectFlow.team(for: .dev, in: ops)?.name, "Dev")
+        XCTAssertEqual(ProjectFlow.team(for: .platform, in: ops)?.name, "DevOps")
+    }
+
+    func testDefaultFlowMatchesTheProcess() {
+        let ids = ProjectFlow.defaultSteps(environments: ["qa", "uat", "production"]).map { $0.id }
+        XCTAssertEqual(ids, ["requirements", "estimate", "build", "review",
+                             "approval-qa", "provision-qa", "deploy-qa", "test-qa",
+                             "approval-uat", "provision-uat", "deploy-uat", "test-uat",
+                             "approval-production", "provision-production", "deploy-production"])
+    }
+
+    func testEveryAgentStepLeavesAFileAndGatesLeaveNone() {
+        let steps = ProjectFlow.defaultSteps(environments: ["qa", "uat", "production"])
+        let files = steps.compactMap { $0.outputFile }
+        XCTAssertEqual(files.count, Set(files).count)
+        XCTAssertEqual(steps.filter { $0.outputFile == nil }.map { $0.kind }, [.approval, .approval, .approval])
+    }
+
+    func testReviewIsDoneByAnotherDevAgent() {
+        let c = company
+        XCTAssertEqual(ProjectFlow.agent(for: FlowStep(kind: .build), in: c)?.person.id, "Dev1")
+        XCTAssertEqual(ProjectFlow.agent(for: FlowStep(kind: .review), in: c)?.person.id, "Dev2")
+        XCTAssertEqual(ProjectFlow.agent(for: FlowStep(kind: .deploy, env: "qa"), in: c)?.team.name, "Deployment")
+    }
+
+    func testVerdictParsing() {
+        XCTAssertEqual(ProjectFlow.verdict(of: "# Report\nVerdict: PASS"), .pass)
+        XCTAssertEqual(ProjectFlow.verdict(of: "x\nVerdict: FAIL"), .fail)
+        XCTAssertEqual(ProjectFlow.verdict(of: "x\nVerdict: CHANGES REQUESTED"), .fail)
+        XCTAssertEqual(ProjectFlow.verdict(of: "x\nStatus: DEPLOYED"), .pass)
+        XCTAssertEqual(ProjectFlow.verdict(of: "x\nStatus: FAILED"), .fail)
+        XCTAssertEqual(ProjectFlow.verdict(of: "just text"), .unknown)
+        // Prose that merely mentions a status or a failure is not a verdict; the closing line decides.
+        XCTAssertEqual(ProjectFlow.verdict(of: "A bad data file exits with status 1 and could fail.\nVerdict: APPROVED"), .pass)
+        XCTAssertEqual(ProjectFlow.verdict(of: "Status: READY earlier\n\n**Verdict: FAIL**"), .fail)
+        XCTAssertEqual(ProjectFlow.verdict(of: "Verdict: PASS\nSome later sentence about failure."), .pass)
+    }
+
+    func testGateShowsTheReportBeforeIt() {
         let p = Project(name: "A", brief: "b", folder: "/tmp/a")
-        XCTAssertTrue(ProjectFlow.instruction(for: .development, project: p).contains("handoff/03-deploy-notice.md"))
-        XCTAssertTrue(ProjectFlow.instruction(for: .testing, project: p).contains("handoff/03-deploy-notice.md"))
+        let qaGate = p.steps.firstIndex { $0.id == "approval-qa" }!
+        let uatGate = p.steps.firstIndex { $0.id == "approval-uat" }!
+        XCTAssertEqual(p.reportBefore(qaGate), "reports/review-report.md")
+        XCTAssertEqual(p.reportBefore(uatGate), "reports/qa-test-report.md")
+    }
+
+    func testInstructionsUseEnvironmentSettings() {
+        var p = Project(name: "A", brief: "b", folder: "/tmp/a")
+        p.environments[0] = EnvSettings(name: "qa", target: .aws, options: ["region": "eu-west-1", "profile": "dev"])
+        let text = ProjectFlow.instruction(for: FlowStep(kind: .deploy, env: "qa"), project: p)
+        XCTAssertTrue(text.contains("AWS (AWS CLI profile: dev, Region: eu-west-1)"))
+        XCTAssertTrue(text.contains("deploy/qa-notice.md"))
+        let prod = ProjectFlow.instruction(for: FlowStep(kind: .deploy, env: "production"), project: p)
+        XCTAssertTrue(prod.contains("reports/production-release.md"))
+        XCTAssertFalse(text.contains("reports/production-release.md"))
+    }
+
+    func testOldProjectFileStillLoads() throws {
+        let json = #"{"id":"1","name":"Old","brief":"b","folder":"/tmp/o","createdAt":"2026-01-01T00:00:00Z","stages":[{"kind":"requirements","status":"done"}]}"#
+        let d = JSONDecoder(); d.dateDecodingStrategy = .iso8601
+        let p = try d.decode(Project.self, from: Data(json.utf8))
+        XCTAssertEqual(p.steps.count, 15)
+        XCTAssertEqual(p.environments.map { $0.name }, ["qa", "uat", "production"])
+    }
+
+    func testSlug() {
+        XCTAssertEqual(ProjectFlow.slug("Müşteri Portalı 2"), "musteri-portali-2")
     }
 }

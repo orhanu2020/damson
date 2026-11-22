@@ -166,6 +166,14 @@ public final class ClaudeCodeProvider: LLMProvider, @unchecked Sendable {
                     process.standardInput = stdin
                     process.standardOutput = stdout
                     process.standardError = stderr
+                    // Drain stderr as it arrives: a full pipe would block the CLI and it would never exit.
+                    let errBuffer = Locked<Data>(Data())
+                    stderr.fileHandleForReading.readabilityHandler = { handle in
+                        let chunk = handle.availableData
+                        if chunk.isEmpty { handle.readabilityHandler = nil; return }   // end of stream
+                        errBuffer.withLock { (d: inout Data) in if d.count < 20_000 { d.append(chunk) } }
+                    }
+                    defer { stderr.fileHandleForReading.readabilityHandler = nil }
                     try process.run()
                     stdin.fileHandleForWriting.write(Self.transcript(request.messages).data(using: .utf8) ?? Data())
                     try? stdin.fileHandleForWriting.close()
@@ -206,10 +214,14 @@ public final class ClaudeCodeProvider: LLMProvider, @unchecked Sendable {
                             }
                         }
                     }
-                    process.waitUntilExit()
+                    // Not waitUntilExit(): that blocks a cooperative thread and can miss the exit.
+                    while process.isRunning {
+                        if Task.isCancelled { process.terminate(); break }
+                        try? await Task.sleep(nanoseconds: 50_000_000)
+                    }
                     if let errorText { throw LLMError.subscription(errorText) }
                     if resultText == nil && full.isEmpty {
-                        let err = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                        let err = String(data: errBuffer.current, encoding: .utf8) ?? ""
                         throw LLMError.subscription(err.isEmpty ? "The Claude Code CLI returned nothing. Is it signed in? Run `claude` in Terminal." : err)
                     }
                     let parsed = Self.parse(full.isEmpty ? (resultText ?? "") : full)

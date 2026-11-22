@@ -2,7 +2,20 @@ import XCTest
 @testable import DamsonCore
 
 final class CompanyTests: XCTestCase {
-    let company = Company.sample
+    /// Turkish names, to keep testing how spoken Turkish suffixes are handled.
+    let company = Company(name: "Test Co", teams: [
+        Team(id: "software", name: "Software", members: [
+            Person(id: "ayse", name: "Ayşe Kaya", role: "Team Lead"),
+            Person(id: "mehmet", name: "Mehmet Demir", role: "Backend Developer"),
+            Person(id: "zeynep", name: "Zeynep Arslan", role: "Mobile Developer"),
+            Person(id: "can", name: "Can Yıldız", role: "Test Engineer"),
+        ]),
+        Team(id: "design", name: "Design", members: [
+            Person(id: "elif", name: "Elif Şahin", role: "Design Director"),
+            Person(id: "burak", name: "Burak Aydın", role: "UI Designer"),
+            Person(id: "selin", name: "Selin Çelik", role: "UX Researcher"),
+        ]),
+    ])
 
     func ids(_ text: String) -> [String]? {
         return CompanyCommandParser.parse(text, company: company)?.people.map { $0.id }
@@ -49,9 +62,16 @@ final class CompanyTests: XCTestCase {
         XCTAssertEqual(reply, "Very well.")
     }
 
-    func testSampleCompanyHasUniqueFirstNames() {
-        let names = company.allPeople.map { CompanyCommandParser.fold($0.firstName) }
+    func testSampleCompanyHasUniqueEnglishFirstNames() {
+        let names = Company.sample.allPeople.map { CompanyCommandParser.fold($0.firstName) }
         XCTAssertEqual(Set(names).count, names.count)
+        XCTAssertTrue(Company.sample.allPeople.allSatisfy { $0.name.allSatisfy { $0.isASCII } })
+    }
+
+    func testProcessAgentsHaveEnglishNames() {
+        let names = ProjectFlow.presets.flatMap { $0.agents.map { $0.name } }
+        XCTAssertEqual(names.count, 7)
+        XCTAssertTrue(names.allSatisfy { $0.allSatisfy { $0.isASCII } })
     }
 }
 

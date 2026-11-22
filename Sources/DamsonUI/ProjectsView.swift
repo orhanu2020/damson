@@ -2,7 +2,7 @@ import SwiftUI
 import AppKit
 import DamsonCore
 
-/// The delivery process: brief -> requirements -> estimates -> development and deploy -> testing and report.
+/// The delivery process: requirements, estimate, build, review, then per environment: approval, provision, deploy, test.
 struct ProjectsView: View {
     @ObservedObject var model: AppModel
     @State private var selectedID: String?
@@ -40,7 +40,7 @@ struct ProjectsView: View {
                     VStack(spacing: 10) {
                         Image(systemName: "list.bullet.clipboard").font(.system(size: 36)).foregroundStyle(.secondary)
                         Text("No projects yet").font(.headline)
-                        Text("Describe what the business needs. Business Analysis writes the requirements, Project Management estimates them, Dev builds and deploys, and Test tests and reports.")
+                        Text("Describe what the business needs. Business Analysis, Project Management and Dev build it; then, with your approval at each gate, Platform, Deployment and Test take it through qa, uat and production.")
                             .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 420)
                         Button("New project") { showNew = true }.buttonStyle(.borderedProminent)
                     }
@@ -57,10 +57,12 @@ struct ProjectsView: View {
 
     private func statusLine(_ p: Project) -> String {
         if p.isFinished { return "Finished" }
-        if let s = p.stages.first(where: { $0.status == .running }) { return "Running: \(s.kind.title)" }
-        if let s = p.stages.first(where: { $0.status == .failed }) { return "Failed: \(s.kind.title)" }
-        let done = p.stages.filter { $0.status == .done }.count
-        return done == 0 ? "Not started" : "\(done)/\(p.stages.count) stages done"
+        if let s = p.steps.first(where: { $0.status == .running }) { return "Running: \(s.title)" }
+        if let s = p.steps.first(where: { $0.status == .waiting }) { return "Waiting: \(s.title)" }
+        if let s = p.steps.first(where: { $0.status == .failed }) { return "Failed: \(s.title)" }
+        if let s = p.steps.first(where: { $0.status == .rejected }) { return "Rejected: \(s.title)" }
+        let done = p.steps.filter { $0.status == .done }.count
+        return done == 0 ? "Not started" : "\(done)/\(p.steps.count) steps done"
     }
 }
 
@@ -70,28 +72,37 @@ private struct ProjectDetail: View {
     @State private var openFile: String?
     @State private var content = ""
     @State private var confirmDelete = false
+    @State private var editingEnv: EnvSettings?
+    @State private var gateNote = ""
 
     private var running: Bool { model.isRunning(project.id) }
-    private var missing: [StageKind] { model.missingTeams() }
+    private var missing: [TeamRole] { model.missingTeams() }
     private var files: [String] {
-        StageKind.allCases.map { $0.outputFile }.filter { FileManager.default.fileExists(atPath: project.folderURL.appendingPathComponent($0).path) }
+        let known = project.steps.compactMap { $0.outputFile } + ["reports/production-release.md"]
+        var seen = Set<String>()
+        return known.filter { seen.insert($0).inserted && FileManager.default.fileExists(atPath: project.folderURL.appendingPathComponent($0).path) }
     }
+    private var needsAction: Bool { project.steps.contains { $0.status == .waiting } }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 header
                 if !missing.isEmpty { missingBanner }
+                environmentsSection
                 VStack(spacing: 8) {
-                    ForEach(project.stages) { stage in stageRow(stage) }
+                    ForEach(Array(project.steps.enumerated()), id: \.element.id) { i, step in stepRow(step, index: i) }
                 }
                 filesSection
                 logSection
             }
             .padding(20)
         }
-        .onChange(of: project.stages) { _, _ in reload() }
+        .onChange(of: project.steps) { _, _ in reload() }
         .onAppear { openFile = files.last; reload() }
+        .sheet(item: $editingEnv) { env in
+            EnvironmentSheet(env: env) { model.updateEnvironment(project.id, $0) }
+        }
         .confirmationDialog("Delete project \(project.name)?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("Delete from list (files stay on disk)", role: .destructive) { model.deleteProject(project.id) }
         }
@@ -105,15 +116,17 @@ private struct ProjectDetail: View {
                 if running {
                     Button("Stop") { model.cancelProject(project.id) }
                 } else if project.isFinished {
-                    Button("Run again") { model.startProject(project.id, from: .requirements) }
-                } else {
-                    Button(project.stages.contains { $0.status == .failed || $0.status == .done } ? "Continue" : "Start") {
+                    Button("Run again") { model.startProject(project.id, from: project.steps.first?.id) }
+                } else if !needsAction {
+                    Button(project.steps.contains { $0.status == .failed || $0.status == .done } ? "Continue" : "Start") {
                         model.startProject(project.id)
                     }
                     .buttonStyle(.borderedProminent).disabled(!missing.isEmpty)
                 }
                 Button { NSWorkspace.shared.activateFileViewerSelecting([project.folderURL]) } label: { Image(systemName: "folder") }
                     .help("Show the project folder in Finder")
+                Button { NSWorkspace.shared.open(project.folderURL.appendingPathComponent("reports")) } label: { Image(systemName: "doc.text.magnifyingglass") }
+                    .help("Open the reports folder")
                 Button(role: .destructive) { confirmDelete = true } label: { Image(systemName: "trash") }.disabled(running)
             }
             Text(project.brief).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
@@ -124,7 +137,7 @@ private struct ProjectDetail: View {
     private var missingBanner: some View {
         HStack {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-            Text("Missing team(s): \(missing.map { $0.teamLabel }.joined(separator: ", ")).").font(.callout)
+            Text("Missing team(s): \(missing.map { $0.title }.joined(separator: ", ")).").font(.callout)
             Spacer()
             Button("Set up delivery teams") { model.setupDeliveryTeams() }
         }
@@ -132,23 +145,47 @@ private struct ProjectDetail: View {
         .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.12)))
     }
 
-    private func stageRow(_ stage: ProjectStage) -> some View {
+    private var environmentsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Environments").font(.headline)
+            Text("Platform and Deployment work from these settings. Click Edit to choose where each environment runs.")
+                .font(.caption).foregroundStyle(.secondary)
+            ForEach(project.environments) { env in
+                HStack {
+                    Image(systemName: "server.rack").foregroundStyle(Theme.green)
+                    Text(env.name).font(.subheadline.weight(.semibold)).frame(width: 90, alignment: .leading)
+                    Text(env.summary).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                    Spacer()
+                    Button("Edit") { editingEnv = env }.controlSize(.small).disabled(running)
+                }
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Theme.card))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.stroke, lineWidth: 1))
+            }
+        }
+    }
+
+    @ViewBuilder private func stepRow(_ step: FlowStep, index: Int) -> some View {
+        if step.kind == .approval { gateRow(step, index: index) } else { agentRow(step) }
+    }
+
+    private func agentRow(_ step: FlowStep) -> some View {
         HStack(alignment: .top, spacing: 12) {
-            statusIcon(stage.status)
+            statusIcon(step.status)
             VStack(alignment: .leading, spacing: 3) {
                 HStack {
-                    Image(systemName: stage.kind.icon).foregroundStyle(Theme.green)
-                    Text(stage.kind.title).font(.subheadline.weight(.semibold))
-                    Text("\u{00B7} \(stage.kind.teamLabel)\(stage.agentName.isEmpty ? "" : " (\(stage.agentName))")")
+                    Image(systemName: step.kind.icon).foregroundStyle(Theme.green)
+                    Text(step.title).font(.subheadline.weight(.semibold))
+                    Text("\u{00B7} \(step.kind.role?.title ?? "")\(step.agentName.isEmpty ? "" : " (\(step.agentName))")")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Text("Writes \(stage.kind.outputFile)").font(.caption2).foregroundStyle(.tertiary)
-                if !stage.error.isEmpty { Text(stage.error).font(.caption).foregroundStyle(.red) }
-                if !stage.summary.isEmpty { Text(stage.summary).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
+                if let f = step.outputFile { Text("Writes \(f)").font(.caption2).foregroundStyle(.tertiary) }
+                if !step.error.isEmpty { Text(step.error).font(.caption).foregroundStyle(.red) }
+                if !step.summary.isEmpty { Text(step.summary).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
             }
             Spacer()
-            if stage.status == .failed && !running {
-                Button("Retry") { model.startProject(project.id, from: stage.kind) }.controlSize(.small)
+            if step.status == .failed && !running {
+                Button("Retry") { model.startProject(project.id, from: step.id) }.controlSize(.small)
             }
         }
         .padding(12)
@@ -156,25 +193,68 @@ private struct ProjectDetail: View {
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.stroke, lineWidth: 1))
     }
 
-    @ViewBuilder private func statusIcon(_ status: StageStatus) -> some View {
+    /// An approval gate. Only these buttons (or the user's own words) pass it.
+    private func gateRow(_ step: FlowStep, index: Int) -> some View {
+        let warning = step.status == .waiting ? model.gateWarning(project, index: index) : nil
+        let report = project.reportBefore(index)
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                statusIcon(step.status)
+                Image(systemName: step.kind.icon).foregroundStyle(.orange)
+                Text(step.title).font(.subheadline.weight(.semibold))
+                Text("\u{00B7} you decide").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+            }
+            if step.status == .waiting {
+                if let report {
+                    Button { openFile = report; reload() } label: { Label("Read \((report as NSString).lastPathComponent)", systemImage: "doc.text") }
+                        .controlSize(.small)
+                }
+                if let warning {
+                    Label("\(warning) Approving anyway is your decision.", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+                TextField("Note (optional)", text: $gateNote).textFieldStyle(.roundedBorder).font(.caption)
+                HStack {
+                    Button(warning == nil ? "Approve" : "Approve anyway") {
+                        model.approveGate(project.id, step.id, note: gateNote, anyway: true); gateNote = ""
+                    }
+                    .buttonStyle(.borderedProminent).tint(warning == nil ? Theme.green : .orange)
+                    Button("Reject", role: .destructive) { model.rejectGate(project.id, step.id, note: gateNote); gateNote = "" }
+                }
+            } else if step.status == .rejected {
+                Text("Rejected\(step.note.isEmpty ? "" : ": \(step.note)")").font(.caption).foregroundStyle(.red)
+                Button("Reopen") { model.reopenGate(project.id, step.id) }.controlSize(.small)
+            } else if step.status == .done && !step.note.isEmpty {
+                Text("Approved: \(step.note)").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.orange.opacity(step.status == .waiting ? 0.10 : 0.04)))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.orange.opacity(step.status == .waiting ? 0.6 : 0.25), lineWidth: 1))
+    }
+
+    @ViewBuilder private func statusIcon(_ status: StepStatus) -> some View {
         switch status {
         case .pending: Image(systemName: "circle").foregroundStyle(.secondary)
         case .running: ProgressView().controlSize(.small)
+        case .waiting: Image(systemName: "pause.circle.fill").foregroundStyle(.orange)
         case .done: Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.onlineGreen)
         case .failed: Image(systemName: "xmark.octagon.fill").foregroundStyle(.red)
+        case .rejected: Image(systemName: "hand.raised.slash.fill").foregroundStyle(.red)
         }
     }
 
     private var filesSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Handoff files").font(.headline)
+            Text("Files and reports").font(.headline)
             if files.isEmpty {
                 Text("Nothing written yet.").font(.caption).foregroundStyle(.secondary)
             } else {
                 Picker("", selection: Binding(get: { openFile ?? files.last ?? "" }, set: { openFile = $0; reload() })) {
-                    ForEach(files, id: \.self) { Text(($0 as NSString).lastPathComponent).tag($0) }
+                    ForEach(files, id: \.self) { Text($0).tag($0) }
                 }
-                .pickerStyle(.segmented).labelsHidden()
+                .pickerStyle(.menu).labelsHidden()
                 ScrollView {
                     Text(content).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading).padding(10)
@@ -239,5 +319,46 @@ private struct NewProjectSheet: View {
         onCreate(p)
         if start && model.missingTeams().isEmpty { model.startProject(p.id) }
         dismiss()
+    }
+}
+
+/// Choose where an environment runs and its target-specific settings.
+private struct EnvironmentSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let env: EnvSettings
+    let onSave: (EnvSettings) -> Void
+    @State private var target: DeployTarget
+    @State private var options: [String: String]
+
+    init(env: EnvSettings, onSave: @escaping (EnvSettings) -> Void) {
+        self.env = env
+        self.onSave = onSave
+        _target = State(initialValue: env.target)
+        _options = State(initialValue: env.options)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Environment: \(env.name)").font(.headline)
+            Picker("Runs on", selection: $target) {
+                ForEach(DeployTarget.allCases) { Text($0.title).tag($0) }
+            }
+            ForEach(target.options, id: \.key) { o in
+                TextField(o.label, text: Binding(get: { options[o.key] ?? "" }, set: { options[o.key] = $0 }), prompt: Text(o.placeholder))
+            }
+            Text("Platform and Deployment use these settings to provision and deploy. Empty fields are chosen by the agent. Cloud targets need the cloud's command-line tool installed and signed in on this Mac.")
+                .font(.caption2).foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button("Save") {
+                    let keys = Set(target.options.map { $0.key })
+                    onSave(EnvSettings(name: env.name, target: target, options: options.filter { keys.contains($0.key) }))
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20).frame(width: 460)
     }
 }
