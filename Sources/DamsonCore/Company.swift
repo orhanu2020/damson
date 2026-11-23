@@ -11,8 +11,12 @@ public struct Person: Identifiable, Codable, Equatable, Sendable {
     public var model: String?
     /// Tools this agent may NOT use. Empty = all tools (changes still need your approval).
     public var disabledTools: [String]
+    /// What the agent is good at ("Development", "Testing" ...). Agents are listed and suggested by capability.
+    /// Empty: worked out from the team the agent is in.
+    public var capability: String = ""
 
-    public init(id: String, name: String, role: String, skills: [String] = [], model: String? = nil, disabledTools: [String] = []) {
+    public init(id: String, name: String, role: String, skills: [String] = [], model: String? = nil, disabledTools: [String] = [], capability: String = "") {
+        self.capability = capability
         self.disabledTools = disabledTools
         self.id = id
         self.name = name
@@ -21,7 +25,7 @@ public struct Person: Identifiable, Codable, Equatable, Sendable {
         self.model = model
     }
 
-    enum CodingKeys: String, CodingKey { case id, name, role, skills, model, disabledTools }
+    enum CodingKeys: String, CodingKey { case id, name, role, skills, model, disabledTools, capability }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -31,6 +35,7 @@ public struct Person: Identifiable, Codable, Equatable, Sendable {
         skills = try c.decodeIfPresent([String].self, forKey: .skills) ?? []
         model = try c.decodeIfPresent(String.self, forKey: .model)
         disabledTools = try c.decodeIfPresent([String].self, forKey: .disabledTools) ?? []
+        capability = try c.decodeIfPresent(String.self, forKey: .capability) ?? ""
     }
 
     public var firstName: String {

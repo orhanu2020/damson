@@ -68,7 +68,7 @@ struct CompanyMenu: View {
             .disabled(model.company.teams.isEmpty)
             Divider()
             Button("Set up delivery teams") { model.setupDeliveryTeams() }
-                .help("Adds Business Analysis, Project Management, Dev and Test teams that are missing")
+                .help("Adds Business Analysis, Design, Dev, Test, Deployment and Platform teams that are missing")
 
         } label: {
             Label("Manage", systemImage: "slider.horizontal.3")
@@ -76,27 +76,6 @@ struct CompanyMenu: View {
         .menuStyle(.borderlessButton)
         .fixedSize()
         .help("Create or delete teams and agents")
-    }
-}
-
-/// Right-click menu for an agent.
-struct AgentContextMenu: View {
-    @ObservedObject var model: AppModel
-    let person: Person
-
-    var body: some View {
-        if let team = model.company.teams.first(where: { $0.members.contains { $0.id == person.id } }) {
-            Button("Settings\u{2026}") { model.companySheet = .editAgent(person, teamID: team.id) }
-            Menu("Move to") {
-                ForEach(model.company.teams.filter { $0.id != team.id }) { other in
-                    Button(other.name) { model.updatePerson(person, team: other.id) }
-                        .disabled(other.members.count >= Company.maxMembers)
-                }
-            }
-            Button("Clear chat") { model.clearPersonChat(person) }
-            Divider()
-            Button("Delete agent", role: .destructive) { model.deletePerson(person.id) }
-        }
     }
 }
 
@@ -127,10 +106,39 @@ struct TeamSheet: View {
     }
 }
 
+/// The agent dialog (opened from the office floor plan).
 struct AgentSheet: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var model: AppModel
     let person: Person?
+    let teamID: String
+
+    private var presetCapability: String {
+        guard person == nil, let p = model.pendingStepAgent, let proj = model.projects.first(where: { $0.id == p.project }) else { return "" }
+        return proj.step(p.step)?.role?.title ?? ""
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(person == nil ? "New agent" : "Edit agent").font(.headline)
+            AgentForm(model: model, person: person, teamID: teamID, showTeam: true, presetCapability: presetCapability, onSaved: { id in
+                if person == nil, let p = model.pendingStepAgent { model.addStepAgent(p.project, p.step, id) }
+                dismiss()
+            }, onCancel: { dismiss() })
+        }
+        .onDisappear { model.pendingStepAgent = nil }
+        .padding(20).frame(width: 460)
+    }
+}
+
+/// The settings of one agent: name, role, team, model, skills and tools. Used in the Agents page and in the dialog.
+struct AgentForm: View {
+    @ObservedObject var model: AppModel
+    let person: Person?
+    let showTeam: Bool
+    let onSaved: (String) -> Void
+    let onCancel: () -> Void
+    @State private var capability: String
     @State var teamID: String
     @State private var name: String
     @State private var role: String
@@ -138,9 +146,13 @@ struct AgentSheet: View {
     @State private var agentModel: String
     @State private var disabledTools: Set<String>
 
-    init(model: AppModel, person: Person?, teamID: String) {
+    init(model: AppModel, person: Person?, teamID: String, showTeam: Bool = false, presetCapability: String = "", onSaved: @escaping (String) -> Void, onCancel: @escaping () -> Void) {
         self.model = model
+        self.showTeam = showTeam
+        _capability = State(initialValue: person.map { ProjectFlow.capability(of: $0, in: model.company) } ?? presetCapability)
         self.person = person
+        self.onSaved = onSaved
+        self.onCancel = onCancel
         _teamID = State(initialValue: teamID)
         _name = State(initialValue: person?.name ?? "")
         _role = State(initialValue: person?.role ?? "")
@@ -152,15 +164,35 @@ struct AgentSheet: View {
     private enum PickerKind: String, Identifiable { case skills, tools; var id: String { rawValue } }
     @State private var picker: PickerKind?
 
+    private var capabilityChoices: [String] {
+        var all = ProjectFlow.capabilities + ["General"]
+        for p in model.company.allPeople { let c = ProjectFlow.capability(of: p, in: model.company); if !all.contains(c) { all.append(c) } }
+        return all
+    }
+
+    private var teamFull: Bool {
+        guard person == nil else { return false }
+        return (model.company.teams.first { $0.id == teamID }?.members.count ?? 0) >= Company.maxMembers
+    }
+
     private var valid: Bool { !name.trimmingCharacters(in: .whitespaces).isEmpty && !role.trimmingCharacters(in: .whitespaces).isEmpty }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text(person == nil ? "New agent" : "Edit agent").font(.headline)
             TextField("Name (e.g. Alex Morgan)", text: $name)
             TextField("Role (e.g. Backend Developer)", text: $role)
-            Picker("Team", selection: $teamID) {
-                ForEach(model.company.teams) { Text($0.name).tag($0.id) }
+            HStack {
+                TextField("Capability (e.g. Development)", text: $capability)
+                Menu {
+                    ForEach(capabilityChoices, id: \.self) { c in Button(c) { capability = c } }
+                } label: { Image(systemName: "chevron.down.circle") }
+                    .menuStyle(.borderlessButton).fixedSize().help("Pick a capability")
+            }
+            Text("Agents are grouped by capability, and a step with no agent chosen takes the first agent with its capability.").font(.caption2).foregroundStyle(.secondary)
+            if showTeam {
+                Picker("Team", selection: $teamID) {
+                    ForEach(model.company.teams) { Text($0.name).tag($0.id) }
+                }
             }
             Picker("Claude model (your subscription)", selection: $agentModel) {
                 Text("Default (from Settings)").tag("")
@@ -176,11 +208,11 @@ struct AgentSheet: View {
             Text("Skills come from your Claude skills and installed plugins. Anything that changes your Mac or an account still asks for your approval.").font(.caption2).foregroundStyle(.secondary)
             HStack {
                 Spacer()
-                Button("Cancel") { dismiss() }
-                Button("Save", action: save).keyboardShortcut(.defaultAction).disabled(!valid)
+                Button(person == nil ? "Cancel" : "Revert") { onCancel() }
+                Button(person == nil ? "Add agent" : "Save", action: save).keyboardShortcut(.defaultAction).disabled(!valid || teamFull)
             }
+            if teamFull { Text("This team already has \(Company.maxMembers) agents.").font(.caption).foregroundStyle(.orange) }
         }
-        .padding(20).frame(width: 460)
         .sheet(item: $picker) { which in
             switch which {
             case .skills:
@@ -206,13 +238,14 @@ struct AgentSheet: View {
         let n = name.trimmingCharacters(in: .whitespaces)
         let r = role.trimmingCharacters(in: .whitespaces)
         if var p = person {
-            p.name = n; p.role = r; p.skills = skills; p.model = agentModel.isEmpty ? nil : agentModel; p.disabledTools = disabledTools.sorted()
+            p.name = n; p.role = r; p.capability = capability.trimmingCharacters(in: .whitespaces); p.skills = skills; p.model = agentModel.isEmpty ? nil : agentModel; p.disabledTools = disabledTools.sorted()
             model.updatePerson(p, team: teamID)
+            onSaved(p.id)
         } else {
             let id = String(UUID().uuidString.prefix(8)).lowercased()
-            model.addPerson(Person(id: id, name: n, role: r, skills: skills, model: agentModel.isEmpty ? nil : agentModel, disabledTools: disabledTools.sorted()), to: teamID)
+            model.addPerson(Person(id: id, name: n, role: r, skills: skills, model: agentModel.isEmpty ? nil : agentModel, disabledTools: disabledTools.sorted(), capability: capability.trimmingCharacters(in: .whitespaces)), to: teamID)
+            onSaved(id)
         }
-        dismiss()
     }
 }
 

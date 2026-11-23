@@ -6,8 +6,9 @@ import DamsonCore
 import DamsonVoice
 
 enum SidebarItem: String, CaseIterable, Identifiable {
-    case company = "Company"
+    case company = "Office"
     case projects = "Projects"
+    case agents = "Agents"
     case settings = "Settings"
 
     var id: String { rawValue }
@@ -16,6 +17,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
         switch self {
         case .company: return "building.2.fill"
         case .projects: return "list.bullet.clipboard.fill"
+        case .agents: return "person.2.crop.square.stack.fill"
         case .settings: return "gearshape"
         }
     }
@@ -23,9 +25,10 @@ enum SidebarItem: String, CaseIterable, Identifiable {
 
 public struct RootView: View {
     @ObservedObject var model: AppModel
-    /// "company", "settings", "team:<id>" or "person:<id>".
-    @State private var selection: String? = "company"
-    @State private var companyOpen = true
+    /// "projects", "project:<id>", "office", "settings", "team:<id>" or "person:<id>".
+    @State private var selection: String? = "projects"
+    @State private var collapsedProjects: Set<String> = []
+    @State private var columns = NavigationSplitViewVisibility.all
     @State private var collapsedTeams: Set<String> = []
 
     public init(model: AppModel) {
@@ -33,71 +36,83 @@ public struct RootView: View {
     }
 
     private var page: SidebarItem {
-        guard let s = selection else { return .company }
+        guard let s = selection else { return .projects }
         if s == "settings" { return .settings }
-        if s == "projects" { return .projects }
+        if s == "agents" { return .agents }
+        if s == "projects" || s.hasPrefix("project:") || s.hasPrefix("step:") { return .projects }
         return .company
     }
 
-    /// Company, with its teams under it and each team's agents under the team.
-    @ViewBuilder private var companyTree: some View {
-        DisclosureGroup(isExpanded: $companyOpen) {
-            ForEach(model.company.teams) { team in
+    private func personRow(_ person: Person, prefix: String) -> some View {
+        Label {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(person.name).lineLimit(1)
+                Text(person.role).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            }
+        } icon: {
+            Image(systemName: "person.crop.circle.fill").foregroundStyle(Theme.olive)
+        }
+        .tag("person:" + person.id)
+        .help("\(person.name), \(person.role)\nModel: \(person.model ?? "default")\nSkills: \(person.skills.isEmpty ? "none" : person.skills.joined(separator: ", "))")
+    }
+
+    /// Projects, each with the teams working on it and each team's agents under the team.
+    @ViewBuilder private var projectsTree: some View {
+        do {
+            ForEach(model.projects) { project in
                 DisclosureGroup(isExpanded: Binding(
-                    get: { !collapsedTeams.contains(team.id) },
-                    set: { if $0 { collapsedTeams.remove(team.id) } else { collapsedTeams.insert(team.id) } }
+                    get: { !collapsedProjects.contains(project.id) },
+                    set: { if $0 { collapsedProjects.remove(project.id) } else { collapsedProjects.insert(project.id) } }
                 )) {
-                    ForEach(team.members) { person in
-                        Label {
-                            VStack(alignment: .leading, spacing: 0) {
-                                Text(person.name).lineLimit(1)
-                                Text(person.role).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                    ForEach(project.orderedSteps) { step in
+                        let crew = model.stepCrew(project, step)
+                        let key = project.id + step.id
+                        let label = Label {
+                            HStack {
+                                Text(step.title).lineLimit(1)
+                                Spacer()
+                                if step.kind == .approval { Text("you").font(.caption).foregroundStyle(.secondary) }
+                                else if crew.isEmpty { Text("no agent").font(.caption).foregroundStyle(.orange) }
+                                else if crew.count > 1 { Text("\(crew.count)").font(.caption).foregroundStyle(.secondary) }
                             }
                         } icon: {
-                            Image(systemName: "person.crop.circle.fill").foregroundStyle(Theme.olive)
+                            Image(systemName: step.kind.icon).foregroundStyle(step.kind == .approval ? Color.orange : Theme.green)
                         }
-                        .tag("person:" + person.id)
-                        .help("\(person.name), \(person.role)\nModel: \(person.model ?? "default")\nSkills: \(person.skills.isEmpty ? "none" : person.skills.joined(separator: ", "))")
-                        .contextMenu { AgentContextMenu(model: model, person: person) }
+                        .tag("step:" + project.id + ":" + step.id)
+                        if crew.isEmpty {
+                            label
+                        } else {
+                            DisclosureGroup(isExpanded: Binding(
+                                get: { !collapsedTeams.contains(key) },
+                                set: { if $0 { collapsedTeams.remove(key) } else { collapsedTeams.insert(key) } }
+                            )) {
+                                ForEach(crew) { personRow($0, prefix: key) }
+                            } label: { label }
+                        }
                     }
                 } label: {
                     Label {
-                        HStack {
-                            Text(team.name).lineLimit(1)
-                            Spacer()
-                            Text("\(team.members.count)").font(.caption).foregroundStyle(.secondary)
-                            Button { model.companySheet = .newAgent(teamID: team.id) } label: {
-                                Image(systemName: "plus.circle.fill").foregroundStyle(Theme.green)
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(team.members.count >= Company.maxMembers)
-                            .help(team.members.count >= Company.maxMembers ? "This team is full" : "Add an agent to \(team.name)")
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text(project.name).lineLimit(1)
+                            Text(project.statusLine).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                         }
                     } icon: {
-                        Image(systemName: "person.2").foregroundStyle(Theme.green)
+                        Image(systemName: "list.bullet.clipboard.fill").foregroundStyle(Theme.green)
                     }
-                    .tag("team:" + team.id)
+                    .tag("project:" + project.id)
                 }
             }
-        } label: {
-            HStack {
-                Label("Company", systemImage: SidebarItem.company.icon)
-                Spacer()
-                Button { model.companySheet = .newTeam } label: {
-                    Image(systemName: "plus.circle.fill").foregroundStyle(Theme.green)
-                }
-                .buttonStyle(.plain)
-                .disabled(model.company.teams.count >= Company.maxTeams)
-                .help(model.company.teams.count >= Company.maxTeams ? "The office is full" : "Add a team")
-            }
-            .tag("company")
         }
     }
 
     private func applySelection(_ new: String?) {
-        model.companyViewActive = new != nil && new != "settings" && new != "projects"
+        model.companyViewActive = new != nil && new != "settings" && new != "agents" && new != "projects" && !(new?.hasPrefix("project:") ?? false) && !(new?.hasPrefix("step:") ?? false)
         guard let new else { return }
-        if new.hasPrefix("person:") {
+        if new.hasPrefix("step:") {
+            model.selectedProjectID = String(new.dropFirst(5).prefix { $0 != ":" })
+        } else if new.hasPrefix("project:") {
+            model.selectedProjectID = String(new.dropFirst(8))
+        } else if new.hasPrefix("person:") {
             model.selectedPeople = [String(new.dropFirst(7))]
         } else if new.hasPrefix("team:"), let team = model.company.teams.first(where: { $0.id == String(new.dropFirst(5)) }) {
             model.selectedPeople = Set(team.members.map { $0.id })
@@ -105,13 +120,24 @@ public struct RootView: View {
     }
 
     public var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columns) {
             List(selection: $selection) {
-                companyTree
-                Label("Projects", systemImage: SidebarItem.projects.icon).tag("projects")
+                projectsTree
+                Label("Agents", systemImage: SidebarItem.agents.icon).tag("agents")
+                Label("Office", systemImage: SidebarItem.company.icon).tag("office")
                 Label("Settings", systemImage: SidebarItem.settings.icon).tag("settings")
             }
-            .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 280)
+            .navigationSplitViewColumnWidth(min: 160, ideal: 250, max: 600)
+            .toolbar(removing: .sidebarToggle)
+            .safeAreaInset(edge: .bottom) {
+                Button { model.showNewProject = true; selection = "projects" } label: {
+                    Label("New project", systemImage: "plus.circle.fill").foregroundStyle(Theme.green)
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 14).padding(.vertical, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.bar)
+            }
         } detail: {
             VStack(spacing: 0) {
                 if !model.approvals.isEmpty {
@@ -120,11 +146,20 @@ public struct RootView: View {
                 switch page {
                 case .company: CompanyView(model: model, status: model.voiceStatus)
                 case .projects: ProjectsView(model: model)
+                case .agents: AgentsView(model: model)
                 case .settings: SettingsView(model: model)
                 }
             }
             .onChange(of: selection) { _, new in applySelection(new) }
+            .onChange(of: model.projects.map { $0.id }) { _, ids in
+                if selection?.hasPrefix("project:") == true || selection?.hasPrefix("step:") == true, let sel = model.selectedProjectID, !ids.contains(sel) { selection = "projects" }
+            }
             .toolbar {
+                ToolbarItem(placement: .navigation) {
+                    Button { columns = columns == .all ? .detailOnly : .all } label: { Image(systemName: "sidebar.left") }
+                        .help("Show or hide the sidebar")
+                        .keyboardShortcut("s", modifiers: [.command, .option])
+                }
                 ToolbarItem(placement: .primaryAction) {
                     Button { model.toggleSpeech() } label: {
                         Image(systemName: model.settings.voiceOutputEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill")

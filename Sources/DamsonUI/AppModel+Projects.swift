@@ -15,25 +15,40 @@ extension AppModel {
 
     private func newPersonID() -> String { String(UUID().uuidString.prefix(8)).lowercased() }
 
-    /// The company as this project sees it: only the teams working on the project.
-    func projectCompany(_ project: Project) -> Company {
-        var c = company
-        c.teams = c.teams.filter { project.usesTeam($0.id) }
-        return c
-    }
+    /// Agents are one pool for all projects, so a project sees the whole company.
+    func projectCompany(_ project: Project) -> Company { company }
 
-    /// Which roles used by the process have no team in the project (steps given to one agent do not need one).
+    /// Roles used by the process that have no agent chosen and no agent with that capability (so the step cannot run).
     func missingTeams(for project: Project) -> [TeamRole] {
-        let scope = projectCompany(project)
-        let roles = Set(project.steps.filter { $0.kind != .approval && $0.agentID == nil }.compactMap { $0.role })
-        return TeamRole.allCases.filter { roles.contains($0) && ProjectFlow.team(for: $0, in: scope) == nil }
+        let roles = Set(project.steps.filter { $0.kind != .approval && $0.agentIDs.isEmpty }.compactMap { $0.role })
+        return TeamRole.allCases.filter { role in
+            roles.contains(role) && project.steps.contains { $0.role == role && $0.agentIDs.isEmpty && ProjectFlow.agent(for: $0, in: company) == nil }
+        }
     }
 
-    /// Everybody who can be given a step in this project: the people of its teams and its extra agents.
-    func projectAgents(_ project: Project) -> [Person] {
-        var people = projectCompany(project).teams.flatMap { $0.members }
-        for team in company.teams { for p in team.members where project.agentIDs.contains(p.id) && !people.contains(where: { $0.id == p.id }) { people.append(p) } }
-        return people
+    /// The agents who do a step (none for approvals).
+    func stepCrew(_ project: Project, _ step: FlowStep) -> [Person] {
+        guard step.kind != .approval else { return [] }
+        return ProjectFlow.agents(for: step, in: company).map { $0.person }
+    }
+
+    /// Everybody who can be given a step: the whole pool.
+    func projectAgents(_ project: Project) -> [Person] { company.allPeople }
+
+    /// The projects in which an agent does at least one step, with the steps.
+    func usage(of personID: String) -> [(project: Project, steps: [FlowStep])] {
+        projects.compactMap { p in
+            let steps = p.steps.filter { s in stepCrew(p, s).contains { $0.id == personID } }
+            return steps.isEmpty ? nil : (p, steps)
+        }
+    }
+
+    /// The team new agents are added to (the agents page has no teams): the first with room, or a new one.
+    func homeTeamID() -> String? {
+        if let t = company.teams.first(where: { $0.members.count < Company.maxMembers }) { return t.id }
+        guard company.teams.count < Company.maxTeams else { return nil }
+        addTeam(name: "Agents")
+        return company.teams.last?.id
     }
 
     // MARK: Editing a project
@@ -43,21 +58,6 @@ extension AppModel {
         if let p = projects.first(where: { $0.id == projectID }) {
             prepareFolders(p)
             try? text.write(to: p.folderURL.appendingPathComponent("handoff/00-brief.md"), atomically: true, encoding: .utf8)
-        }
-    }
-
-    func setTeam(_ projectID: String, _ teamID: String, on: Bool) {
-        update(projectID) { p in
-            var ids = p.teamIDs.isEmpty ? company.teams.map { $0.id } : p.teamIDs
-            if on { if !ids.contains(teamID) { ids.append(teamID) } } else { ids.removeAll { $0 == teamID } }
-            p.teamIDs = Set(ids) == Set(company.teams.map { $0.id }) ? [] : ids
-        }
-    }
-
-    func setAgent(_ projectID: String, _ personID: String, on: Bool) {
-        update(projectID) { p in
-            p.agentIDs.removeAll { $0 == personID }
-            if on { p.agentIDs.append(personID) }
         }
     }
 
@@ -87,11 +87,44 @@ extension AppModel {
     }
 
     @discardableResult
-    func connect(_ projectID: String, from: String, to: String) -> Bool {
+    func connect(_ projectID: String, from: String, to: String, condition: EdgeCondition = .always, fromSide: FlowSide? = nil, toSide: FlowSide? = nil) -> Bool {
         guard !isRunning(projectID) else { return false }
         var ok = false
-        update(projectID) { ok = $0.connect(from: from, to: to) }
+        update(projectID) { ok = $0.connect(from: from, to: to, condition: condition, fromSide: fromSide, toSide: toSide) }
         return ok
+    }
+
+    /// Moves an end of a connection to another step or side. Returns the connection's new id.
+    @discardableResult
+    func reconnect(_ projectID: String, _ edgeID: String, from: String? = nil, to: String? = nil, fromSide: FlowSide?, toSide: FlowSide?) -> String? {
+        guard !isRunning(projectID) else { return nil }
+        var id: String?
+        update(projectID) { id = $0.reconnect(edgeID, from: from, to: to, fromSide: fromSide, toSide: toSide) }
+        return id
+    }
+
+    /// Adds an agent to a step. A step that still uses its team's default agent keeps that agent first.
+    func addStepAgent(_ projectID: String, _ stepID: String, _ personID: String) {
+        guard !isRunning(projectID), let project = projects.first(where: { $0.id == projectID }),
+              let step = project.step(stepID), !step.agentIDs.contains(personID) else { return }
+        var list = step.agentIDs
+        if list.isEmpty, step.kind != .task, let d = ProjectFlow.agent(for: step, in: projectCompany(project)), d.person.id != personID { list = [d.person.id] }
+        list.append(personID)
+        updateStep(projectID, stepID) { $0.agentIDs = list; if $0.kind == .task { $0.customRole = nil } }
+    }
+
+    func removeStepAgent(_ projectID: String, _ stepID: String, _ personID: String) {
+        guard !isRunning(projectID) else { return }
+        updateStep(projectID, stepID) { $0.agentIDs.removeAll { $0 == personID } }
+    }
+
+    /// Puts the steps back in rows (layout only).
+    func arrangeSteps(_ projectID: String) {
+        update(projectID) { p in
+            var steps = p.steps
+            ProjectFlow.arrange(&steps)
+            p.steps = steps
+        }
     }
 
     func setEdge(_ projectID: String, _ edgeID: String, condition: EdgeCondition?) {
@@ -100,6 +133,46 @@ extension AppModel {
             guard let i = p.edges.firstIndex(where: { $0.id == edgeID }) else { return }
             if let condition { p.edges[i].condition = condition } else { p.edges.remove(at: i) }
         }
+    }
+
+    func setEdgeLabel(_ projectID: String, _ edgeID: String, _ label: String) {
+        update(projectID) { p in
+            if let i = p.edges.firstIndex(where: { $0.id == edgeID }) { p.edges[i].label = label }
+        }
+    }
+
+    @discardableResult
+    func insertStep(_ projectID: String, kind: StepKind, on edgeID: String) -> String? {
+        guard !isRunning(projectID) else { return nil }
+        var id: String?
+        update(projectID) { id = $0.insertStep(kind: kind, on: edgeID) }
+        return id
+    }
+
+    @discardableResult
+    func duplicateStep(_ projectID: String, _ stepID: String) -> String? {
+        guard !isRunning(projectID) else { return nil }
+        var id: String?
+        update(projectID) { id = $0.duplicateStep(stepID) }
+        return id
+    }
+
+    // Notes are documentation, so they can be edited any time.
+    @discardableResult
+    func addNote(_ projectID: String, at point: CGPoint) -> String {
+        let note = FlowNote(x: Double(point.x), y: Double(point.y))
+        update(projectID) { $0.notes.append(note) }
+        return note.id
+    }
+
+    func editNote(_ projectID: String, _ noteID: String, _ change: (inout FlowNote) -> Void) {
+        update(projectID) { p in
+            if let i = p.notes.firstIndex(where: { $0.id == noteID }) { change(&p.notes[i]) }
+        }
+    }
+
+    func removeNote(_ projectID: String, _ noteID: String) {
+        update(projectID) { $0.notes.removeAll { $0.id == noteID } }
     }
 
     /// Back to the standard delivery process (all progress is cleared).
@@ -178,7 +251,9 @@ extension AppModel {
                 : from.map { p.downstream(of: $0) } ?? Set(p.steps.filter { $0.status != .done && $0.status != .waiting }.map { $0.id })
             for i in p.steps.indices where reset.contains(p.steps[i].id) {
                 p.steps[i].status = .pending; p.steps[i].error = ""; p.steps[i].summary = ""; p.steps[i].badVerdict = false
+                if all { p.steps[i].round = 0; p.steps[i].feedback = "" }
             }
+            if all { for i in p.edges.indices { p.edges[i].rounds = 0 } }
         }
         let task = Task { @MainActor in
             defer { projectTasks[id] = nil }
@@ -241,24 +316,39 @@ extension AppModel {
             log(id, "✗ \(step.title): \(message)")
             return false
         }
-        let scope = step.agentID != nil ? company : projectCompany(project)
-        guard let (team, agent) = ProjectFlow.agent(for: step, in: scope) else {
-            return fail(step.agentID != nil ? "The agent for this step no longer exists. Pick another in the process."
-                        : "No \(step.role?.title ?? "") team with an agent in this project. Add one under Overview, or use Manage > Set up delivery teams.")
+        let crew = ProjectFlow.agents(for: step, in: company)
+        guard let (team, agent) = crew.first else {
+            return fail(!step.agentIDs.isEmpty ? "The agent for this step no longer exists. Pick another in the process."
+                        : "No agent for this step. Pick one in the step's settings, or add an agent with the \(step.role?.title ?? "right") capability on the Agents page.")
         }
-        updateStep(id, step.id) { $0.status = .running; $0.agentName = agent.name }
-        personStatus[agent.id] = .working
+        updateStep(id, step.id) { $0.status = .running; $0.agentName = crew.map { $0.person.name }.joined(separator: ", ") }
         log(id, "▶ \(step.title): \(agent.name) (\(team.name)) started")
-        defer { personStatus[agent.id] = nil }
+        defer { for member in crew { personStatus[member.person.id] = nil } }
 
         let output = step.outputFile.map { project.folderURL.appendingPathComponent($0) }
         if let output { try? FileManager.default.removeItem(at: output) }
         let instruction = ProjectFlow.instruction(for: step, project: project)
         var bad = false
         do {
-            let summary = try await engine.runTask(as: agent, company: company, instruction: instruction,
+            var summary = ""
+            for (n, member) in crew.enumerated() {
+                let person = member.person
+                personStatus[person.id] = .working
+                var text = instruction
+                if n > 0 {
+                    log(id, "\u{25B6} \(person.name) (\(member.team.name)) takes over from \(crew[n - 1].person.name)")
+                    text += """
+
+
+                    TEAMMATES WORKED ON THIS STEP BEFORE YOU: \(crew[..<n].map { $0.person.name }.joined(separator: ", ")).
+                    Read what they produced (the output file and the other files in the project folder). Do not start over: check it, correct mistakes, fill gaps and improve it, and leave the output file complete and in the required format.
+                    """
+                }
+                summary = try await engine.runTask(as: person, company: company, instruction: text,
                                                    directory: project.folderURL, stage: step.id) { [weak self] tool in
-                Task { @MainActor in self?.log(id, "   \(agent.firstName): \(tool)") }
+                    Task { @MainActor in self?.log(id, "   \(person.firstName): \(tool)") }
+                }
+                personStatus[person.id] = nil
             }
             if let output, let file = step.outputFile {
                 let size = (try? FileManager.default.attributesOfItem(atPath: output.path)[.size] as? Int) ?? 0
@@ -269,6 +359,24 @@ extension AppModel {
                 if bad && (step.kind.stopsOnBadVerdict || step.kind == .task) && !failBranch {
                     return fail("\(file) reports a failure. Read it, fix the cause and retry.")
                 }
+            }
+            if bad, let loop = project.edges.first(where: { $0.loop && $0.from == step.id }) {
+                // Send the work back: the target and everything after it (this step included) run again.
+                guard loop.rounds < ProjectFlow.maxLoops else {
+                    return fail("\(step.outputFile ?? "The report") still reports problems after \(ProjectFlow.maxLoops) rework rounds. Fix it yourself or retry.")
+                }
+                let feedback = step.outputFile ?? ""
+                update(id) { p in
+                    guard let e = p.edges.firstIndex(where: { $0.id == loop.id }) else { return }
+                    p.edges[e].rounds += 1
+                    for i in p.steps.indices where p.downstream(of: loop.to).contains(p.steps[i].id) {
+                        p.steps[i].status = .pending; p.steps[i].error = ""; p.steps[i].summary = ""; p.steps[i].badVerdict = false
+                        if p.steps[i].id == loop.to { p.steps[i].round = p.edges[e].rounds; p.steps[i].feedback = feedback }
+                    }
+                }
+                let target = project.step(loop.to)?.title ?? loop.to
+                log(id, "\u{21BB} \(step.title) found problems: back to \(target) (rework round \(loop.rounds + 1) of \(ProjectFlow.maxLoops)).")
+                return true
             }
             updateStep(id, step.id) { $0.status = .done; $0.summary = summary; $0.badVerdict = bad }
             log(id, "✓ \(step.title) done\(step.outputFile.map { ". Written to \($0)" } ?? "")")

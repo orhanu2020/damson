@@ -75,7 +75,7 @@ final class EngineLogicTests: XCTestCase {
 final class ProjectFlowTests: XCTestCase {
     private func team(_ n: String) -> Team { Team(id: n, name: n, members: [Person(id: n + "1", name: n + " A", role: "r"), Person(id: n + "2", name: n + " B", role: "r")]) }
     private var company: Company {
-        Company(name: "X", teams: ["Project Management", "Business Analysis", "Dev", "Platform", "Deployment", "Test"].map(team))
+        Company(name: "X", teams: ["Design", "Business Analysis", "Dev", "Platform", "Deployment", "Test"].map(team))
     }
 
     func testGraphRunsInOrderAndRoutesOnVerdict() {
@@ -96,6 +96,67 @@ final class ProjectFlowTests: XCTestCase {
         XCTAssertEqual(ProjectFlow.toSkip(in: p), [ok])
     }
 
+    func testAgentsAreFoundByCapabilityNotTeam() {
+        let tester = Person(id: "t1", name: "Tess Tester", role: "QA", capability: "Test")
+        let other = Person(id: "o1", name: "Olly", role: "Dev", capability: "Development")
+        let c = Company(name: "X", teams: [Team(id: "pool", name: "Agents", members: [other, tester])])
+        XCTAssertEqual(ProjectFlow.capability(of: tester, in: c), "Test")
+        XCTAssertEqual(ProjectFlow.agent(for: FlowStep(kind: .test, env: "qa"), in: c)?.person.id, "t1")
+        XCTAssertNil(ProjectFlow.agent(for: FlowStep(kind: .design), in: c))
+        var chosen = FlowStep(kind: .design)
+        chosen.agentIDs = ["o1"]
+        XCTAssertEqual(ProjectFlow.agents(for: chosen, in: c).map { $0.person.id }, ["o1"])
+    }
+
+    func testSidesAndReconnect() throws {
+        var p = Project(name: "X", brief: "", folder: "/tmp/x")
+        XCTAssertTrue(p.connect(from: "requirements", to: "build", fromSide: .bottom, toSide: .top))
+        let e = p.edges.first { $0.id == "requirements->build" }!
+        XCTAssertEqual(e.fromSide, .bottom)
+        let back = try JSONDecoder().decode(Project.self, from: JSONEncoder().encode(p))
+        XCTAssertEqual(back.edges.first { $0.id == "requirements->build" }?.toSide, .top)
+        // Move the end to another step and another side.
+        XCTAssertEqual(p.reconnect("requirements->build", to: "review", fromSide: .bottom, toSide: .left), "requirements->review")
+        XCTAssertNil(p.reconnect("requirements->review", to: "requirements", fromSide: nil, toSide: nil))
+        XCTAssertTrue(p.edges.contains { $0.id == "requirements->review" })
+    }
+
+    func testOrderedStepsFollowTheProcess() {
+        var p = Project(name: "X", brief: "", folder: "/tmp/x")
+        let id = p.addStep(kind: .task, at: CGPoint(x: 0, y: 0))
+        p.connect(from: "review", to: id)
+        let ids = p.orderedSteps.map { $0.id }
+        XCTAssertEqual(ids.count, p.steps.count)
+        XCTAssertEqual(ids.first, "requirements")
+        XCTAssertTrue(ids.firstIndex(of: "review")! < ids.firstIndex(of: id)!)
+    }
+
+    func testStepAgentsAndLegacyDecode() throws {
+        var step = FlowStep(kind: .build)
+        step.agentIDs = ["a", "b"]
+        XCTAssertEqual(step.agentID, "a")
+        let back = try JSONDecoder().decode(FlowStep.self, from: JSONEncoder().encode(step))
+        XCTAssertEqual(back.agentIDs, ["a", "b"])
+        let legacy = #"{"id":"x","kind":"task","agentID":"z"}"#.data(using: .utf8)!
+        XCTAssertEqual(try JSONDecoder().decode(FlowStep.self, from: legacy).agentIDs, ["z"])
+    }
+
+    func testInsertDuplicateAndNotes() {
+        var p = Project(name: "X", brief: "", folder: "/tmp/x")
+        let edge = p.edges.first { $0.from == "requirements" && $0.to == "design" }!
+        let id = p.insertStep(kind: .approval, on: edge.id)!
+        XCTAssertFalse(p.edges.contains { $0.id == edge.id })
+        XCTAssertTrue(p.edges.contains { $0.from == "requirements" && $0.to == id })
+        XCTAssertTrue(p.edges.contains { $0.from == id && $0.to == "design" })
+        let copy = p.duplicateStep("build")!
+        XCTAssertNotEqual(copy, "build")
+        XCTAssertEqual(p.step(copy)?.kind, .build)
+        p.notes.append(FlowNote(text: "hi", x: 1, y: 2))
+        let data = try! JSONEncoder().encode(p)
+        let back = try! JSONDecoder().decode(Project.self, from: data)
+        XCTAssertEqual(back.notes.first?.text, "hi")
+    }
+
     func testConnectionsCannotLoopOrRepeat() {
         var p = Project(name: "G", brief: "b", folder: "/tmp/g")
         p.steps = []; p.edges = []
@@ -103,17 +164,37 @@ final class ProjectFlowTests: XCTestCase {
         XCTAssertNotEqual(a, b)
         XCTAssertTrue(p.connect(from: a, to: b))
         XCTAssertTrue(p.connect(from: b, to: c))
-        XCTAssertFalse(p.connect(from: c, to: a))
+        XCTAssertTrue(p.connect(from: c, to: a))
+        XCTAssertEqual(p.edges.last, FlowEdge(from: c, to: a, loop: true))
+        XCTAssertEqual(p.edges.last?.condition, .fail)
         XCTAssertFalse(p.connect(from: a, to: b))
         XCTAssertFalse(p.connect(from: a, to: a))
         XCTAssertEqual(p.downstream(of: b), [b, c])
         p.removeStep(b)
-        XCTAssertTrue(p.edges.isEmpty)
+        XCTAssertFalse(p.edges.contains { $0.from == b || $0.to == b })
+    }
+
+    func testFailedReviewSendsWorkBackOnlyAlongTheLoop() {
+        var p = Project(name: "L", brief: "b", folder: "/tmp/l")
+        for id in ["requirements", "design", "build"] { p.steps[p.steps.firstIndex { $0.id == id }!].status = .done }
+        let r = p.steps.firstIndex { $0.id == "review" }!
+        p.steps[r].status = .done; p.steps[r].badVerdict = true
+        // The forward edge needs a pass, so the approval is skipped; the loop edge is not an ordinary dependency.
+        XCTAssertEqual(ProjectFlow.toSkip(in: p), ["approval-qa"])
+        XCTAssertFalse(ProjectFlow.ready(in: p).contains("build"))
+        var build = FlowStep(kind: .build)
+        build.round = 2; build.feedback = "reports/review-report.md"
+        let text = ProjectFlow.instruction(for: build, project: p)
+        XCTAssertTrue(text.contains("REWORK ROUND 2 OF 3") && text.contains("reports/review-report.md"))
+        XCTAssertEqual(ProjectFlow.maxLoops, 3)
+        XCTAssertTrue(p.downstream(of: "build").contains("review"))
     }
 
     func testJoinWaitsForAllBranchesAndDefaultProcessIsAChain() {
         let p = Project(name: "D", brief: "b", folder: "/tmp/d")
-        XCTAssertEqual(p.edges.count, p.steps.count - 1)
+        XCTAssertEqual(p.edges.count, p.steps.count - 1 + 3)
+        XCTAssertEqual(p.edges.filter { $0.loop }.map { $0.from }, ["review", "test-qa", "test-uat"])
+        XCTAssertTrue(p.edges.filter { $0.loop }.allSatisfy { $0.to == "build" })
         XCTAssertEqual(ProjectFlow.ready(in: p), ["requirements"])
         XCTAssertTrue(p.steps.allSatisfy { $0.x > 0 })
         XCTAssertEqual(p.reportBefore(p.steps.firstIndex { $0.id == "approval-qa" }!), "reports/review-report.md")
@@ -122,12 +203,12 @@ final class ProjectFlowTests: XCTestCase {
     func testProjectWithoutGraphFieldsStillLoads() throws {
         let json = """
         {"id":"1","name":"Old","brief":"b","folder":"/tmp/o","createdAt":"2026-01-01T00:00:00Z",
-         "steps":[{"id":"requirements","kind":"requirements","status":"done"},{"id":"estimate","kind":"estimate","status":"pending"}]}
+         "steps":[{"id":"requirements","kind":"requirements","status":"done"},{"id":"design","kind":"design","status":"pending"}]}
         """
         let d = JSONDecoder(); d.dateDecodingStrategy = .iso8601
         let p = try d.decode(Project.self, from: Data(json.utf8))
-        XCTAssertEqual(p.edges, [FlowEdge(from: "requirements", to: "estimate")])
-        XCTAssertEqual(ProjectFlow.ready(in: p), ["estimate"])
+        XCTAssertEqual(p.edges, [FlowEdge(from: "requirements", to: "design")])
+        XCTAssertEqual(ProjectFlow.ready(in: p), ["design"])
         XCTAssertTrue(p.teamIDs.isEmpty && p.usesTeam("any"))
     }
 
@@ -147,7 +228,7 @@ final class ProjectFlowTests: XCTestCase {
 
     func testFindsTeamsByName() {
         let c = company
-        XCTAssertEqual(ProjectFlow.team(for: .projectManagement, in: c)?.name, "Project Management")
+        XCTAssertEqual(ProjectFlow.team(for: .design, in: c)?.name, "Design")
         XCTAssertEqual(ProjectFlow.team(for: .businessAnalysis, in: c)?.name, "Business Analysis")
         XCTAssertEqual(ProjectFlow.team(for: .dev, in: c)?.name, "Dev")
         XCTAssertEqual(ProjectFlow.team(for: .platform, in: c)?.name, "Platform")
@@ -162,7 +243,7 @@ final class ProjectFlowTests: XCTestCase {
 
     func testDefaultFlowMatchesTheProcess() {
         let ids = ProjectFlow.defaultSteps(environments: ["qa", "uat", "production"]).map { $0.id }
-        XCTAssertEqual(ids, ["requirements", "estimate", "build", "review",
+        XCTAssertEqual(ids, ["requirements", "design", "build", "review",
                              "approval-qa", "provision-qa", "deploy-qa", "test-qa",
                              "approval-uat", "provision-uat", "deploy-uat", "test-uat",
                              "approval-production", "provision-production", "deploy-production"])

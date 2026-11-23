@@ -38,6 +38,11 @@ public final class AppModel: ObservableObject {
     @Published public var personStatus: [String: PersonStatus] = [:]
     /// Direct chats with people, by person id.
     // Projects (the delivery process)
+    /// The project shown on the Projects page (chosen in the sidebar), and the New project sheet.
+    @Published var selectedProjectID: String?
+    @Published var showNewProject = false
+    /// An agent being created from a process step: it is added to that step when saved.
+    var pendingStepAgent: (project: String, step: String)?
     @Published var projects: [Project] = ProjectStore.load() {
         didSet {
             guard !reloadingProjects else { return }

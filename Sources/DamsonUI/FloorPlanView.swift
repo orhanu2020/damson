@@ -3,20 +3,26 @@ import DamsonCore
 
 // MARK: - Layout (design coordinates; the office grows and shrinks with the teams)
 
-/// Where everything sits on the floor: team rooms in two columns, the rows stacking downwards. Each room is sized by
-/// how many people are in the team. Everyone stays in their own room.
+/// Where everything sits on the floor: one room per capability (business analysis, design, development, test,
+/// deployment, platform), three rooms per row, with a corridor between the columns. Everyone stays in their own room.
 struct OfficeLayout {
     struct RoomSlot: Identifiable {
         let team: Team
         let rect: CGRect
         let tint: Color
-        /// +1 when the door is on the right wall (left column), -1 on the left wall (right column).
-        let doorSide: CGFloat
+        /// The column (0...2). Corridor i lies between column i and i+1.
+        let col: Int
+        /// The walls that have a door: +1 the right wall, -1 the left wall.
+        let sides: [CGFloat]
         var id: String { team.id }
 
-        var doorX: CGFloat { doorSide > 0 ? rect.maxX : rect.minX }
         var doorY: CGFloat { rect.maxY - 60 }
-        var insideX: CGFloat { doorSide > 0 ? rect.maxX - 14 : rect.minX + 14 }
+        func doorX(_ side: CGFloat) -> CGFloat { side > 0 ? rect.maxX : rect.minX }
+        func insideX(_ side: CGFloat) -> CGFloat { side > 0 ? rect.maxX - 14 : rect.minX + 14 }
+        func corridor(_ side: CGFloat) -> Int { side > 0 ? col : col - 1 }
+        func side(toward corridor: Int) -> CGFloat? { sides.first { self.corridor($0) == corridor } }
+        /// The side used to go out for a drink or a chat when nothing else is asked.
+        var mainSide: CGFloat { sides.first ?? 1 }
         /// The water and coffee corner along the bottom wall.
         var counterX: CGFloat { rect.maxX - 72 }
         var coffeeSpot: CGPoint { CGPoint(x: counterX - 25, y: rect.maxY - 38) }
@@ -37,7 +43,7 @@ struct OfficeLayout {
     static let corridorWidth: CGFloat = 64
 
     var size = CGSize(width: 640, height: 420)
-    var corridor = CGRect.zero
+    var corridors: [CGRect] = []
     var rooms: [RoomSlot] = []
     var desks: [Desk] = []
     var seats: [Seat] = []
@@ -60,44 +66,58 @@ struct OfficeLayout {
         return CGSize(width: max(240, 124 + CGFloat(cols - 1) * 121), height: 64 + 78 * CGFloat(rows) + 34)
     }
 
+    /// The rooms: the standard capabilities in order (always shown), then any other capability somebody has.
+    static func rooms(of company: Company) -> [Team] {
+        var names = ProjectFlow.capabilities
+        var buckets: [String: [Person]] = [:]
+        for person in company.allPeople {
+            let c = ProjectFlow.capability(of: person, in: company)
+            let name = names.first { $0.caseInsensitiveCompare(c) == .orderedSame } ?? c
+            if !names.contains(name) { names.append(name) }
+            buckets[name, default: []].append(person)
+        }
+        return names.map { Team(id: "cap:" + $0, name: $0, members: buckets[$0] ?? []) }
+    }
+
     init(company: Company) {
         let margin: CGFloat = 16
-        let sizes = company.teams.map { Self.roomSize(members: $0.members.count) }
-
-        // Both columns are as wide as the widest room. Each room goes into the column that is currently shorter.
-        let colW = max(280, sizes.map { $0.width }.max() ?? 0)
-        var left: [Int] = [], right: [Int] = []
-        var leftH = margin, rightH = margin
-        for (i, sz) in sizes.enumerated() {
-            if leftH <= rightH { left.append(i); leftH += sz.height + margin } else { right.append(i); rightH += sz.height + margin }
-        }
-        let columns = right.isEmpty ? 1 : 2
+        let teams = Self.rooms(of: company)
+        let sizes = teams.map { Self.roomSize(members: $0.members.count) }
+        let perRow = 3
+        let cols = min(perRow, max(teams.count, 1))
+        let colW = max(250, sizes.map { $0.width }.max() ?? 0)
         let cw = Self.corridorWidth
-        size = CGSize(width: margin + colW + cw + (columns == 2 ? colW : 0) + margin, height: max(leftH, rightH, 200))
-        corridor = CGRect(x: margin + colW, y: margin, width: cw, height: size.height - 2 * margin)
+        let rowCount = (teams.count + perRow - 1) / perRow
+        var rowY: [CGFloat] = [], rowH: [CGFloat] = []
+        var y = margin
+        for r in 0..<rowCount {
+            let h = sizes[(r * perRow)..<min(teams.count, (r + 1) * perRow)].map { $0.height }.max() ?? 0
+            rowY.append(y); rowH.append(h); y += h + margin
+        }
+        size = CGSize(width: margin * 2 + CGFloat(cols) * colW + CGFloat(cols - 1) * cw, height: max(y, 200))
+        corridors = (0..<max(cols - 1, 0)).map { i in
+            CGRect(x: margin + CGFloat(i + 1) * colW + CGFloat(i) * cw, y: margin, width: cw, height: size.height - 2 * margin)
+        }
 
-        func lay(_ column: [Int], x: CGFloat, side: CGFloat) {
-            var y = margin
-            for index in column {
-                let team = company.teams[index]
-                let rect = CGRect(x: x, y: y, width: colW, height: sizes[index].height)
-                let tint = Self.palette[index % Self.palette.count]
-                rooms.append(RoomSlot(team: team, rect: rect, tint: tint, doorSide: side))
-                let cols = min(max(team.members.count, 1), 3)
-                let firstX = rect.midX - CGFloat(cols - 1) * 121 / 2
-                for (j, person) in team.members.enumerated() {
-                    let px = firstX + CGFloat(j % 3) * 121
-                    let deskY = rect.minY + 62 + CGFloat(j / 3) * 78
-                    desks.append(Desk(id: person.id, center: CGPoint(x: px, y: deskY)))
-                    homes[person.id] = CGPoint(x: px, y: deskY + 34)
-                    roomIndex[person.id] = rooms.count - 1
-                    seats.append(Seat(person: person, tint: tint))
-                }
-                y += rect.height + margin
+        for (index, team) in teams.enumerated() {
+            let col = index % perRow, row = index / perRow
+            let rect = CGRect(x: margin + CGFloat(col) * (colW + cw), y: rowY[row], width: colW, height: rowH[row])
+            let tint = Self.palette[index % Self.palette.count]
+            var sides: [CGFloat] = []
+            if col > 0 { sides.append(-1) }
+            if col < cols - 1 { sides.append(1) }
+            rooms.append(RoomSlot(team: team, rect: rect, tint: tint, col: col, sides: sides))
+            let n = min(max(team.members.count, 1), 3)
+            let firstX = rect.midX - CGFloat(n - 1) * 121 / 2
+            for (j, person) in team.members.enumerated() {
+                let px = firstX + CGFloat(j % 3) * 121
+                let deskY = rect.minY + 62 + CGFloat(j / 3) * 78
+                desks.append(Desk(id: person.id, center: CGPoint(x: px, y: deskY)))
+                homes[person.id] = CGPoint(x: px, y: deskY + 34)
+                roomIndex[person.id] = rooms.count - 1
+                seats.append(Seat(person: person, tint: tint))
             }
         }
-        lay(left, x: margin, side: 1)
-        lay(right, x: margin + colW + cw, side: -1)
     }
 }
 
@@ -153,8 +173,8 @@ final class OfficeSim: ObservableObject {
         let roll = Int.random(in: 0..<100)
         if roll < 30 {
             drink(a)
-        } else if roll < 65, let b = free.filter({ $0 != a }).randomElement() {
-            meet(a, b)
+        } else if roll < 65, let b = free.filter({ $0 != a }).randomElement(), meet(a, b) {
+            return
         } else if let b = free.filter({ $0 != a && layout.roomIndex[$0] == room }).randomElement() {
             visit(a, b)
         } else {
@@ -162,25 +182,27 @@ final class OfficeSim: ObservableObject {
         }
     }
 
-    /// Out of the chair, along the aisle to the wall on the corridor side.
-    private func toWall(_ id: String) -> [CGPoint] {
+    /// Out of the chair, along the aisle to the wall on the given side.
+    private func toWall(_ id: String, side: CGFloat) -> [CGPoint] {
         guard let h = layout.homes[id], let r = layout.roomIndex[id] else { return [] }
         let room = layout.rooms[r]
         let aisle = h.y + 20
-        return [CGPoint(x: h.x, y: aisle), CGPoint(x: room.insideX, y: aisle)]
+        return [CGPoint(x: h.x, y: aisle), CGPoint(x: room.insideX(side), y: aisle)]
     }
 
-    /// Two people meet in the corridor and chat.
-    private func meet(_ a: String, _ b: String) {
+    /// Two people meet in a corridor both rooms open onto and chat.
+    private func meet(_ a: String, _ b: String) -> Bool {
         guard let ha = layout.homes[a], let hb = layout.homes[b],
-              let ra = layout.roomIndex[a], let rb = layout.roomIndex[b] else { return }
+              let ra = layout.roomIndex[a], let rb = layout.roomIndex[b] else { return false }
+        let roomA = layout.rooms[ra], roomB = layout.rooms[rb]
+        guard let c = roomA.sides.map({ roomA.corridor($0) }).first(where: { roomB.side(toward: $0) != nil }),
+              let sa = roomA.side(toward: c), let sb = roomB.side(toward: c) else { return false }
         busy.insert(a)
         busy.insert(b)
-        let roomA = layout.rooms[ra], roomB = layout.rooms[rb]
-        let cx = layout.corridor.midX
+        let cx = layout.corridors[c].midX
         let y = (roomA.doorY + roomB.doorY) / 2
-        let pathA = toWall(a) + [CGPoint(x: roomA.insideX, y: roomA.doorY), CGPoint(x: cx, y: roomA.doorY), CGPoint(x: cx - 14, y: y)]
-        let pathB = toWall(b) + [CGPoint(x: roomB.insideX, y: roomB.doorY), CGPoint(x: cx, y: roomB.doorY), CGPoint(x: cx + 14, y: y)]
+        let pathA = toWall(a, side: sa) + [CGPoint(x: roomA.insideX(sa), y: roomA.doorY), CGPoint(x: cx, y: roomA.doorY), CGPoint(x: cx - 14, y: y)]
+        let pathB = toWall(b, side: sb) + [CGPoint(x: roomB.insideX(sb), y: roomB.doorY), CGPoint(x: cx, y: roomB.doorY), CGPoint(x: cx + 14, y: y)]
         Task { @MainActor in
             async let va = walk(a, pathA, abortable: true)
             async let vb = walk(b, pathB, abortable: true)
@@ -198,6 +220,7 @@ final class OfficeSim: ObservableObject {
             busy.remove(a)
             busy.remove(b)
         }
+        return true
     }
 
     /// Walk to the water and coffee corner of the own room, take a drink, walk back.
@@ -206,7 +229,8 @@ final class OfficeSim: ObservableObject {
         let room = layout.rooms[r]
         let coffee = Bool.random()
         let spot = coffee ? room.coffeeSpot : room.waterSpot
-        let path = toWall(a) + [CGPoint(x: room.insideX, y: spot.y), spot]
+        let side = room.mainSide
+        let path = toWall(a, side: side) + [CGPoint(x: room.insideX(side), y: spot.y), spot]
         busy.insert(a)
         Task { @MainActor in
             let visited = await walk(a, path, abortable: true)
@@ -299,9 +323,11 @@ struct FloorPlanView: View {
     private func office(_ layout: OfficeLayout) -> some View {
         ZStack(alignment: .topLeading) {
             RoundedRectangle(cornerRadius: 22).fill(Theme.card).allowsHitTesting(false)
-            RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05))
-                .frame(width: layout.corridor.width, height: layout.corridor.height)
-                .position(x: layout.corridor.midX, y: layout.corridor.midY).allowsHitTesting(false)
+            ForEach(Array(layout.corridors.enumerated()), id: \.offset) { _, corridor in
+                RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05))
+                    .frame(width: corridor.width, height: corridor.height)
+                    .position(x: corridor.midX, y: corridor.midY).allowsHitTesting(false)
+            }
             ForEach(layout.rooms) { room in
                 RoomView(model: model, room: room)
             }
@@ -332,7 +358,6 @@ struct FloorPlanView: View {
             .position(point)
             .zIndex(hasBubble ? 5 : 1)
             .onTapGesture { model.toggleSelection(id) }
-            .contextMenu { AgentContextMenu(model: model, person: seat.person) }
     }
 }
 
@@ -352,11 +377,13 @@ struct RoomView: View {
                 .frame(width: room.rect.width, height: room.rect.height)
                 .position(x: room.rect.midX, y: room.rect.midY)
                 .allowsHitTesting(false)
-            // The door in the wall facing the corridor.
-            RoundedRectangle(cornerRadius: 2).fill(Theme.card)
-                .frame(width: 8, height: 36).position(x: room.doorX, y: room.doorY).allowsHitTesting(false)
-            RoundedRectangle(cornerRadius: 2).stroke(room.tint.opacity(0.75), lineWidth: 1.5)
-                .frame(width: 8, height: 36).position(x: room.doorX, y: room.doorY).allowsHitTesting(false)
+            // Doors in the walls facing a corridor.
+            ForEach(room.sides, id: \.self) { side in
+                RoundedRectangle(cornerRadius: 2).fill(Theme.card)
+                    .frame(width: 8, height: 36).position(x: room.doorX(side), y: room.doorY).allowsHitTesting(false)
+                RoundedRectangle(cornerRadius: 2).stroke(room.tint.opacity(0.75), lineWidth: 1.5)
+                    .frame(width: 8, height: 36).position(x: room.doorX(side), y: room.doorY).allowsHitTesting(false)
+            }
             // Water and coffee corner.
             RoundedRectangle(cornerRadius: 4).fill(Color(red: 0.72, green: 0.55, blue: 0.38))
                 .frame(width: 100, height: 14).position(x: room.counterX, y: room.rect.maxY - 10).allowsHitTesting(false)
@@ -366,17 +393,12 @@ struct RoomView: View {
                 .position(x: room.waterSpot.x, y: room.rect.maxY - 22).allowsHitTesting(false)
             HStack(spacing: 6) {
                 Image(systemName: "door.left.hand.open").foregroundStyle(room.tint)
-                Text(room.team.name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                Text("\(room.team.members.count) people").font(.system(size: 10)).foregroundStyle(.secondary)
-                Spacer()
+                Text(room.team.name).font(.system(size: 13, weight: .semibold))
+                    .lineLimit(2).fixedSize(horizontal: false, vertical: true).layoutPriority(2)
+                Text("\(room.team.members.count) \(room.team.members.count == 1 ? "agent" : "agents")").font(.system(size: 10)).foregroundStyle(.secondary).fixedSize()
+                Spacer(minLength: 4)
                 Button(allSelected ? "Deselect room" : "Select room") { model.setTeamSelected(room.team, !allSelected) }
-                    .buttonStyle(.plain).font(.system(size: 10, weight: .medium)).foregroundStyle(room.tint)
-                Button { model.companySheet = .newAgent(teamID: room.team.id) } label: {
-                    Image(systemName: "person.badge.plus").font(.system(size: 13, weight: .semibold))
-                }
-                .buttonStyle(.plain).foregroundStyle(room.tint)
-                .disabled(room.team.members.count >= Company.maxMembers)
-                .help(room.team.members.count >= Company.maxMembers ? "This team is full" : "Add an agent to \(room.team.name)")
+                    .buttonStyle(.plain).font(.system(size: 10, weight: .medium)).foregroundStyle(room.tint).fixedSize()
             }
             .frame(width: room.rect.width - 28)
             .position(x: room.rect.midX, y: room.rect.minY + 20)

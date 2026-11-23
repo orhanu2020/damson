@@ -45,7 +45,7 @@ struct CompanyView: View {
             .frame(width: 42, height: 42)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Company").font(.headline)
-                Text("\(model.company.teams.count) teams \u{00B7} \(model.company.allPeople.count) people")
+                Text("\(OfficeLayout.rooms(of: model.company).filter { !$0.members.isEmpty }.count) capabilities \u{00B7} \(model.company.allPeople.count) agents")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()

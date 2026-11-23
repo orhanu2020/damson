@@ -2,60 +2,41 @@ import SwiftUI
 import AppKit
 import DamsonCore
 
-/// The delivery process: requirements, estimate, build, review, then per environment: approval, provision, deploy, test.
+/// The delivery process: requirements, design, build, review, then per environment: approval, provision, deploy, test.
 struct ProjectsView: View {
     @ObservedObject var model: AppModel
-    @State private var selectedID: String?
-    @State private var showNew = false
 
-    private var project: Project? { model.projects.first { $0.id == selectedID } ?? model.projects.first }
+    private var project: Project? { model.projects.first { $0.id == model.selectedProjectID } ?? model.projects.first }
 
     var body: some View {
-        HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 0) {
-                HStack {
-                    Text("Projects").font(.headline)
-                    Spacer()
-                    Button { showNew = true } label: { Image(systemName: "plus") }.help("New project")
+        Group {
+            if let project {
+                ProjectDetail(model: model, project: project)
+                    .id(project.id)
+            } else {
+                VStack(spacing: 10) {
+                    Image(systemName: "list.bullet.clipboard").font(.system(size: 36)).foregroundStyle(.secondary)
+                    Text("No projects yet").font(.headline)
+                    Text("Write the high-level requirements, choose the teams and agents, and define the process as a flow. The standard process takes it through analysis and requirements, design, build and review, then qa, uat and production with your approval at each gate.")
+                        .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 420)
+                    Button("New project") { model.showNewProject = true }.buttonStyle(.borderedProminent)
                 }
-                .padding(12)
-                Divider()
-                List(selection: Binding(get: { project?.id }, set: { selectedID = $0 })) {
-                    ForEach(model.projects) { p in
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(p.name).lineLimit(1)
-                            Text(statusLine(p)).font(.caption2).foregroundStyle(.secondary)
-                        }
-                        .tag(p.id)
-                    }
-                }
-            }
-            .frame(width: 210)
-            Divider()
-            Group {
-                if let project {
-                    ProjectDetail(model: model, project: project)
-                        .id(project.id)
-                } else {
-                    VStack(spacing: 10) {
-                        Image(systemName: "list.bullet.clipboard").font(.system(size: 36)).foregroundStyle(.secondary)
-                        Text("No projects yet").font(.headline)
-                        Text("Write the high-level requirements, choose the teams and agents, and define the process as a flow. The standard process takes it through requirements, estimate, build and review, then qa, uat and production with your approval at each gate.")
-                            .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 420)
-                        Button("New project") { showNew = true }.buttonStyle(.borderedProminent)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .background(Theme.chatBackground)
-        .navigationTitle("Projects")
-        .sheet(isPresented: $showNew) {
-            NewProjectSheet(model: model) { selectedID = $0.id }
+        .navigationTitle(project?.name ?? "Projects")
+        .sheet(isPresented: $model.showNewProject) {
+            NewProjectSheet(model: model) { model.selectedProjectID = $0.id }
         }
     }
 
-    private func statusLine(_ p: Project) -> String {
+}
+
+extension Project {
+    /// One line for the sidebar: where the process stands.
+    var statusLine: String {
+        let p = self
         if p.isFinished { return "Finished" }
         if let s = p.steps.first(where: { $0.status == .running }) { return "Running: \(s.title)" }
         if let s = p.steps.first(where: { $0.status == .waiting }) { return "Waiting: \(s.title)" }
@@ -104,7 +85,7 @@ private struct ProjectDetail: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
                         requirementsSection
-                        teamsSection
+                        crewSection
                         environmentsSection
                     }
                     .padding(.bottom, 20)
@@ -163,9 +144,9 @@ private struct ProjectDetail: View {
     private var missingBanner: some View {
         HStack {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-            Text("The process needs team(s) this project does not have: \(missing.map { $0.title }.joined(separator: ", ")).").font(.callout)
+            Text("No agent can do these steps yet: \(missing.map { $0.title }.joined(separator: ", ")). Choose agents in the Process tab or add agents with that capability.").font(.callout)
             Spacer()
-            Button("Set up delivery teams") { model.setupDeliveryTeams() }
+            Button("Add standard agents") { model.setupDeliveryTeams() }
         }
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.12)))
@@ -190,37 +171,23 @@ private struct ProjectDetail: View {
         }
     }
 
-    private var teamsSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Teams and agents").font(.headline)
-            Text("The teams working on this project. A step goes to the team whose name matches its role; a custom step can also go to one agent.")
+    /// Who works on the project: found from the process steps (choose agents in the Process tab).
+    private var crewSection: some View {
+        let rows = project.orderedSteps.filter { $0.kind != .approval }
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("Agents").font(.headline)
+            Text("Agents come from the shared pool. Choose who does each step in the Process tab: click a step and use Add agent.")
                 .font(.caption).foregroundStyle(.secondary)
-            if model.company.teams.isEmpty {
-                Text("There are no teams yet. Create them in Company, or use Set up delivery teams.").font(.caption).foregroundStyle(.secondary)
-            }
-            ForEach(model.company.teams) { team in
+            ForEach(rows) { step in
+                let crew = model.stepCrew(project, step)
                 HStack(alignment: .top) {
-                    Toggle("", isOn: Binding(get: { project.usesTeam(team.id) }, set: { model.setTeam(project.id, team.id, on: $0) }))
-                        .labelsHidden().disabled(running)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(team.name).font(.subheadline.weight(.semibold))
-                        Text(team.members.isEmpty ? "No agents" : team.members.map { $0.name }.joined(separator: ", "))
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
+                    Image(systemName: step.kind.icon).foregroundStyle(Theme.green).frame(width: 22)
+                    Text(step.title).font(.subheadline.weight(.semibold)).frame(width: 190, alignment: .leading)
+                    Text(crew.isEmpty ? "no agent" : crew.map { $0.name }.joined(separator: ", "))
+                        .font(.caption).foregroundStyle(crew.isEmpty ? Color.orange : Color.secondary)
                     Spacer()
                 }
-                .padding(10)
-                .background(RoundedRectangle(cornerRadius: 10).fill(Theme.card))
-                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.stroke, lineWidth: 1))
-            }
-            let others = model.company.teams.filter { !project.usesTeam($0.id) }.flatMap { $0.members }
-            if !others.isEmpty {
-                Text("Individual agents from other teams").font(.caption.weight(.semibold)).padding(.top, 4)
-                ForEach(others) { person in
-                    Toggle("\(person.name) \u{00B7} \(person.role)", isOn: Binding(get: { project.agentIDs.contains(person.id) },
-                                                                                  set: { model.setAgent(project.id, person.id, on: $0) }))
-                        .font(.caption).disabled(running)
-                }
+                .padding(.vertical, 4)
             }
         }
     }
@@ -286,6 +253,7 @@ private struct ProjectDetail: View {
                 Spacer()
             }
             if step.status == .waiting {
+                if !step.about.isEmpty { Text(step.about).font(.callout).textSelection(.enabled) }
                 if let report {
                     Button { openFile = report; reload() } label: { Label("Read \((report as NSString).lastPathComponent)", systemImage: "doc.text") }
                         .controlSize(.small)
