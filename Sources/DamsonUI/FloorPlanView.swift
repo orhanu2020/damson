@@ -297,17 +297,19 @@ final class OfficeSim: ObservableObject {
 struct FloorPlanView: View {
     @ObservedObject var model: AppModel
     @StateObject private var sim = OfficeSim()
+    /// The width the office may use. It grows with the window up to `maxScale`, and never gets smaller than
+    /// `minScale`: below that the page scrolls instead.
+    var availableWidth: CGFloat = 900
+    static let minScale: CGFloat = 0.9
+    static let maxScale: CGFloat = 2.0
 
     var body: some View {
         let layout = OfficeLayout(company: model.company)
-        GeometryReader { geo in
-            let scale = min(max(geo.size.width / layout.size.width, 0.6), 1.6)
-            office(layout)
-                .frame(width: layout.size.width, height: layout.size.height)
-                .scaleEffect(scale, anchor: .topLeading)
-                .frame(width: layout.size.width * scale, height: layout.size.height * scale, alignment: .topLeading)
-        }
-        .aspectRatio(layout.size.width / layout.size.height, contentMode: .fit)
+        let scale = min(max(availableWidth / layout.size.width, Self.minScale), Self.maxScale)
+        office(layout)
+            .frame(width: layout.size.width, height: layout.size.height)
+            .scaleEffect(scale, anchor: .topLeading)
+            .frame(width: layout.size.width * scale, height: layout.size.height * scale, alignment: .topLeading)
         .onAppear {
             sim.configure(layout: layout)
             sim.isAssigned = { [weak model] id in

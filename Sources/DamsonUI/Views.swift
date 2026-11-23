@@ -143,12 +143,19 @@ public struct RootView: View {
                 if !model.approvals.isEmpty {
                     ApprovalBanner(model: model)
                 }
+                ProcessApprovalBanner(model: model)
                 switch page {
                 case .company: CompanyView(model: model, status: model.voiceStatus)
                 case .projects: ProjectsView(model: model)
                 case .agents: AgentsView(model: model)
                 case .settings: SettingsView(model: model)
                 }
+            }
+            .sheet(isPresented: $model.showNewProject) {
+                NewProjectSheet(model: model) { model.selectedProjectID = $0.id; selection = "project:" + $0.id }
+            }
+            .onChange(of: model.openProject) { _, id in
+                if let id { selection = "project:" + id; model.openProject = nil }
             }
             .onChange(of: selection) { _, new in applySelection(new) }
             .onChange(of: model.projects.map { $0.id }) { _, ids in
@@ -204,6 +211,77 @@ struct ApprovalBanner: View {
             }
         }
         .padding([.horizontal, .top], 12)
+    }
+}
+
+/// Process gates waiting for the user, from every project, shown on every page like other approvals.
+struct ProcessApprovalBanner: View {
+    @ObservedObject var model: AppModel
+    @State private var notes: [String: String] = [:]
+
+    private struct Gate: Identifiable {
+        let project: Project
+        let step: FlowStep
+        let index: Int
+        var id: String { project.id + "|" + step.id }
+    }
+
+    private var gates: [Gate] {
+        model.projects.flatMap { p in
+            p.steps.enumerated().compactMap { i, s in
+                s.kind == .approval && s.status == .waiting ? Gate(project: p, step: s, index: i) : nil
+            }
+        }
+    }
+
+    var body: some View {
+        let list = gates
+        if !list.isEmpty {
+            VStack(spacing: 8) {
+                ForEach(list) { gate in row(gate) }
+            }
+            .padding([.horizontal, .top], 12)
+        }
+    }
+
+    private func row(_ gate: Gate) -> some View {
+        let warning = model.gateWarning(gate.project, index: gate.index)
+        let report = gate.project.reportBefore(gate.index)
+        let note = Binding(get: { notes[gate.id] ?? "" }, set: { notes[gate.id] = $0 })
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Label("Approval needed", systemImage: "hand.raised.fill").font(.headline)
+                Text("\(gate.project.name) \u{00B7} \(gate.step.title)").font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+                Spacer()
+                Button("Open project") { model.openProject = gate.project.id }.controlSize(.small)
+            }
+            if !gate.step.about.isEmpty { Text(gate.step.about).font(.callout).textSelection(.enabled) }
+            if let report {
+                Button { NSWorkspace.shared.open(gate.project.folderURL.appendingPathComponent(report)) } label: {
+                    Label("Read \((report as NSString).lastPathComponent)", systemImage: "doc.text")
+                }
+                .controlSize(.small)
+            }
+            if let warning {
+                Label("\(warning) Approving anyway is your decision.", systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.orange)
+            }
+            TextField("Note (optional)", text: note).textFieldStyle(.roundedBorder).font(.caption)
+            HStack {
+                Button(warning == nil ? "Approve" : "Approve anyway") {
+                    model.approveGate(gate.project.id, gate.step.id, note: notes[gate.id] ?? "", anyway: true)
+                    notes[gate.id] = nil
+                }
+                .buttonStyle(.borderedProminent).tint(warning == nil ? Theme.green : .orange)
+                Button("Reject", role: .destructive) {
+                    model.rejectGate(gate.project.id, gate.step.id, note: notes[gate.id] ?? "")
+                    notes[gate.id] = nil
+                }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.15))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 

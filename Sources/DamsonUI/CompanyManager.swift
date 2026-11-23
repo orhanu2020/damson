@@ -2,24 +2,20 @@ import SwiftUI
 import DamsonCore
 import DamsonProviders
 
-/// Which modal dialog the Company tab is showing.
+/// Which agent dialog is showing.
 enum CompanySheet: Identifiable {
-    case newTeam
-    case renameTeam(Team)
     case newAgent(teamID: String)
     case editAgent(Person, teamID: String)
 
     var id: String {
         switch self {
-        case .newTeam: return "newTeam"
-        case .renameTeam(let t): return "rename-\(t.id)"
         case .newAgent(let id): return "new-\(id)"
         case .editAgent(let p, _): return "edit-\(p.id)"
         }
     }
 }
 
-/// Attaches the Company tab's modal dialogs and the delete-team confirmation.
+/// Attaches the agent dialogs.
 struct CompanySheets: ViewModifier {
     @ObservedObject var model: AppModel
 
@@ -27,82 +23,12 @@ struct CompanySheets: ViewModifier {
         content
             .sheet(item: $model.companySheet) { sheet in
                 switch sheet {
-                case .newTeam:
-                    TeamSheet(title: "New team", name: "") { model.addTeam(name: $0) }
-                case .renameTeam(let team):
-                    TeamSheet(title: "Rename team", name: team.name) { model.renameTeam(team.id, to: $0) }
                 case .newAgent(let teamID):
                     AgentSheet(model: model, person: nil, teamID: teamID)
                 case .editAgent(let person, let teamID):
                     AgentSheet(model: model, person: person, teamID: teamID)
                 }
             }
-            .confirmationDialog("Delete team \(model.teamToDelete?.name ?? "")?",
-                                isPresented: Binding(get: { model.teamToDelete != nil }, set: { if !$0 { model.teamToDelete = nil } }),
-                                titleVisibility: .visible) {
-                Button("Delete team and its agents", role: .destructive) {
-                    if let t = model.teamToDelete { model.deleteTeam(t.id) }
-                    model.teamToDelete = nil
-                }
-            } message: {
-                Text("The \(model.teamToDelete?.members.count ?? 0) agent(s) in it are deleted too. This cannot be undone.")
-            }
-    }
-}
-
-/// The "Manage" menu in the Company header: teams and agents.
-struct CompanyMenu: View {
-    @ObservedObject var model: AppModel
-
-    var body: some View {
-        Menu {
-            Button("New team\u{2026}") { model.companySheet = .newTeam }
-                .disabled(model.company.teams.count >= Company.maxTeams)
-            Menu("Rename team") {
-                ForEach(model.company.teams) { team in Button(team.name) { model.companySheet = .renameTeam(team) } }
-            }
-            .disabled(model.company.teams.isEmpty)
-            Menu("Delete team") {
-                ForEach(model.company.teams) { team in Button(team.name, role: .destructive) { model.teamToDelete = team } }
-            }
-            .disabled(model.company.teams.isEmpty)
-            Divider()
-            Button("Set up delivery teams") { model.setupDeliveryTeams() }
-                .help("Adds Business Analysis, Design, Dev, Test, Deployment and Platform teams that are missing")
-
-        } label: {
-            Label("Manage", systemImage: "slider.horizontal.3")
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .help("Create or delete teams and agents")
-    }
-}
-
-struct TeamSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    let title: String
-    @State var name: String
-    let onSave: (String) -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text(title).font(.headline)
-            TextField("Team name", text: $name).onSubmit(save)
-            HStack {
-                Spacer()
-                Button("Cancel") { dismiss() }
-                Button("Save", action: save).keyboardShortcut(.defaultAction).disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
-            }
-        }
-        .padding(20).frame(width: 340)
-    }
-
-    private func save() {
-        let n = name.trimmingCharacters(in: .whitespaces)
-        guard !n.isEmpty else { return }
-        onSave(n)
-        dismiss()
     }
 }
 

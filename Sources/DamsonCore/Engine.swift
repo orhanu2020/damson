@@ -165,7 +165,7 @@ public final class DamsonEngine: @unchecked Sendable {
     /// All paths resolve inside `directory`, and writes there are free; everything else still goes through approval.
     /// Returns the agent's closing summary. Throws if the model cannot be reached.
     public func runTask(as person: Person, company: Company, instruction: String, directory: URL,
-                        stage: String, maxSteps: Int = 40,
+                        stage: String, maxSteps: Int = 40, policy: TaskPolicy = .inherit,
                         onTool: @escaping @Sendable (String) -> Void) async throws -> String {
         let cfg = settings
         let system = Prompts.person(person, company: company, style: cfg.style, verbosity: .detailed, now: Date(), work: true)
@@ -173,7 +173,7 @@ public final class DamsonEngine: @unchecked Sendable {
         let specs = tools.specs.filter { !person.disabledTools.contains($0.name) }
         let sel = SkillStore.selection(for: person.skills, all: SkillStore.list())
         let context = ToolContext(taskID: "project-\(directory.lastPathComponent)", subtaskID: stage,
-                                  scratchDir: directory, workspaceDir: directory)
+                                  scratchDir: directory, workspaceDir: directory, policy: policy)
         var messages: [Message] = [Message(role: .user, text: instruction)]
         var lastText = ""
         for _ in 0..<maxSteps {
@@ -214,12 +214,14 @@ public final class DamsonEngine: @unchecked Sendable {
 
     /// One turn of a direct chat with a person from the Company tab. Each person keeps their own history
     /// and may use their enabled tools; every tool call goes through the policy gate (changes need approval).
-    public func chat(with person: Person, company: Company, text: String,
+    public func chat(with person: Person, company: Company, text: String, images: [Data] = [],
                      onSentence: @escaping @Sendable (String) -> Void,
                      onTool: @escaping @Sendable (String) -> Void = { _ in }) async -> String {
         let cfg = settings
         let state = personState(person.id)
-        var newMessages: [Message] = [Message(role: .user, text: text)]
+        var userBlocks: [ContentBlock] = [.text(text.isEmpty && !images.isEmpty ? "(picture)" : text)]
+        for data in images { userBlocks.append(.image(mediaType: "image/png", data: data)) }
+        var newMessages: [Message] = [Message(role: .user, content: userBlocks)]
         let system = Prompts.person(person, company: company, style: cfg.style, verbosity: cfg.verbosity, now: Date())
         let route = person.model.map { ModelRoute(provider: ClaudeCodeProvider.providerID, model: $0) }
         let specs = tools.specs.filter { !person.disabledTools.contains($0.name) }

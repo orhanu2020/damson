@@ -8,6 +8,22 @@ public enum ActionClass: String, Codable, Sendable {
     case change
 }
 
+/// How a task's changes are approved. A project mode picks one; `inherit` follows the Settings trust level.
+public enum TaskPolicy: Sendable, Equatable {
+    /// The Settings trust level.
+    case inherit
+    /// Every change asks.
+    case ask
+    /// Like trusted workspace, with the task's own folder as the workspace (never less than the Settings level).
+    case workspace
+    /// Writing files inside the task's folder skips the card; everything else asks.
+    case acceptEdits
+    /// Nothing may change except these files (relative to the task's folder); other changes are refused without asking.
+    case plan(writable: [String])
+    /// Every change runs without asking, dangerous commands included.
+    case bypass
+}
+
 public struct ToolContext: Sendable {
     public var taskID: String
     public var subtaskID: String
@@ -15,12 +31,14 @@ public struct ToolContext: Sendable {
     public var scratchDir: URL
     /// The user's workspace folder (shell starts here, relative paths resolve here). Nil = use the scratch folder.
     public var workspaceDir: URL?
+    public var policy: TaskPolicy
 
-    public init(taskID: String, subtaskID: String, scratchDir: URL, workspaceDir: URL? = nil) {
+    public init(taskID: String, subtaskID: String, scratchDir: URL, workspaceDir: URL? = nil, policy: TaskPolicy = .inherit) {
         self.taskID = taskID
         self.subtaskID = subtaskID
         self.scratchDir = scratchDir
         self.workspaceDir = workspaceDir
+        self.policy = policy
     }
 
     /// Where commands start and relative paths resolve.
@@ -174,9 +192,15 @@ public final class PolicyGate: @unchecked Sendable {
 
         if actionClass == .change {
             let key = tool.grantKey(call.input)
+            let verdict = trust.verdict(tool: tool.spec.name, input: call.input, context: context)
+            if case .deny(let message) = verdict {
+                audit(AuditRecord(taskID: context.taskID, subtaskID: context.subtaskID, tool: tool.spec.name,
+                                  summary: summary, actionClass: actionClass, decision: "refused-by-mode", succeeded: false))
+                return ToolOutcome(output: message, isError: true, actionClass: actionClass, wasDenied: true)
+            }
             if hasGrant(taskID: context.taskID, key: key) {
                 decisionLabel = "task-grant"
-            } else if trust.verdict(tool: tool.spec.name, input: call.input, context: context) == .autoApprove {
+            } else if verdict == .autoApprove {
                 decisionLabel = "trusted-\(trust.level.rawValue)"
             } else {
                 let request = ApprovalRequest(id: UUID().uuidString, taskID: context.taskID, subtaskID: context.subtaskID,

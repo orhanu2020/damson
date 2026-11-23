@@ -40,18 +40,6 @@ extension AppModel {
         company.teams.append(Team(id: newID(), name: name, members: []))
     }
 
-    func renameTeam(_ id: String, to name: String) {
-        guard let i = company.teams.firstIndex(where: { $0.id == id }) else { return }
-        company.teams[i].name = name
-    }
-
-    /// Deleting a team removes the agents in it.
-    func deleteTeam(_ id: String) {
-        guard let team = company.teams.first(where: { $0.id == id }) else { return }
-        for member in team.members { forget(member) }
-        company.teams.removeAll { $0.id == id }
-    }
-
     func reloadSkills() { skills = SkillStore.list() }
 
     func addPerson(_ person: Person, to teamID: String) {
@@ -96,15 +84,17 @@ extension AppModel {
     }
 
     /// Sends one message to a person and streams their reply (and any tool use) into their chat.
-    func chat(with person: Person, text: String, speak: Bool, viaVoice: Bool) async {
+    func chat(with person: Person, text: String, images: [Data] = [], speak: Bool, viaVoice: Bool) async {
         let id = person.id
-        personChats[id, default: []].append(ChatMessage(kind: .user, text: text, viaVoice: viaVoice))
+        var sent = ChatMessage(kind: .user, text: text, viaVoice: viaVoice)
+        sent.images = images
+        personChats[id, default: []].append(sent)
         personResponding.insert(id)
         personStatus[id] = .working
         let currentReply = Locked<UUID?>(nil)   // the assistant bubble currently being filled
         let voice = self.voice
 
-        _ = await engine.chat(with: person, company: company, text: text, onSentence: { [weak self] sentence in
+        _ = await engine.chat(with: person, company: company, text: text, images: images, onSentence: { [weak self] sentence in
             Task { @MainActor in
                 guard let self else { return }
                 var list = self.personChats[id] ?? []
@@ -133,12 +123,12 @@ extension AppModel {
 
     /// Picks the people (or teams) named in the command and lets their agents answer.
     /// With one person open, everything goes to them as a chat. Returns false when nobody is addressed.
-    func runCompanyCommand(_ text: String, speak: Bool, viaVoice: Bool = false) async -> Bool {
+    func runCompanyCommand(_ text: String, images: [Data] = [], speak: Bool, viaVoice: Bool = false) async -> Bool {
         // A waiting tool approval is answered by the user's own words, never by a model.
         if engine.resolveApprovalByWords(text) != nil { return true }
         // Chat open: words go to that person, unless the user asks to select someone else.
         if let open = chatPerson, !Self.wantsSelection(text) {
-            await chat(with: open, text: text, speak: speak, viaVoice: viaVoice)
+            await chat(with: open, text: text, images: images, speak: speak, viaVoice: viaVoice)
             return true
         }
         let command: CompanyCommand
@@ -158,7 +148,7 @@ extension AppModel {
         // A single person addressed by name starts a chat with them.
         if command.people.count == 1, let only = command.people.first {
             withAnimation(.easeInOut(duration: 0.15)) { selectedPeople = [only.id] }
-            await chat(with: only, text: text, speak: speak, viaVoice: viaVoice)
+            await chat(with: only, text: text, images: images, speak: speak, viaVoice: viaVoice)
             return true
         }
         DebugLog.write("company command: '\(text)' -> \(command.people.map { $0.name })")

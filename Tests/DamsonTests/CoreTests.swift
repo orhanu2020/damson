@@ -108,6 +108,31 @@ final class ProjectFlowTests: XCTestCase {
         XCTAssertEqual(ProjectFlow.agents(for: chosen, in: c).map { $0.person.id }, ["o1"])
     }
 
+    func testInputsOutputsAndTheirInstructions() throws {
+        var p = Project(name: "X", brief: "", folder: "/tmp/x")
+        let out = p.addOutput(to: "design", path: "../docs/api.md")!
+        XCTAssertEqual(p.step("design")?.outputs.first?.path, "docs/api.md")
+        XCTAssertTrue(p.addInput(to: "build", from: "design", file: "docs/api.md"))
+        XCTAssertTrue(p.addInput(to: "build", from: "requirements", file: "handoff/01-analysis-and-requirements.md"))
+        XCTAssertFalse(p.addInput(to: "build", from: "design", file: "nope.md"))
+        XCTAssertFalse(p.addInput(to: "build", from: "design", file: "docs/api.md"))
+        XCTAssertEqual(p.consumers(of: "design", file: "docs/api.md").map { $0.id }, ["build"])
+        let text = ProjectFlow.instruction(for: p.step("build")!, project: p)
+        XCTAssertTrue(text.contains("INPUTS FOR THIS STEP") && text.contains("docs/api.md"))
+        let writes = ProjectFlow.instruction(for: p.step("design")!, project: p)
+        XCTAssertTrue(writes.contains("YOU MUST ALSO WRITE") && writes.contains("docs/api.md"))
+        // Renaming follows into the readers; removing the output removes the input.
+        p.renameOutput(step: "design", doc: out, to: "docs/interfaces.md")
+        XCTAssertTrue(p.step("build")!.inputs.contains { $0.file == "docs/interfaces.md" })
+        p.removeOutput(step: "design", doc: out)
+        XCTAssertFalse(p.step("build")!.inputs.contains { $0.file == "docs/interfaces.md" })
+        // Removing a step removes inputs that came from it; everything survives saving.
+        p.removeStep("requirements")
+        XCTAssertTrue(p.step("build")!.inputs.isEmpty)
+        let back = try JSONDecoder().decode(Project.self, from: JSONEncoder().encode(p))
+        XCTAssertEqual(back.steps.count, p.steps.count)
+    }
+
     func testSidesAndReconnect() throws {
         var p = Project(name: "X", brief: "", folder: "/tmp/x")
         XCTAssertTrue(p.connect(from: "requirements", to: "build", fromSide: .bottom, toSide: .top))

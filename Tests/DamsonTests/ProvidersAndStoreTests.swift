@@ -190,4 +190,14 @@ final class LegacyRouteTests: XCTestCase {
         let route = try JSONDecoder().decode(ModelRoute.self, from: Data(json.utf8))
         XCTAssertEqual(route.provider, ClaudeCodeProvider.providerID)
     }
+
+    func testPicturesAreSentWithTheMessage() {
+        let png = Data([0x89, 0x50, 0x4E, 0x47])
+        let messages = [Message(role: .user, content: [.text("look"), .image(mediaType: "image/png", data: png)])]
+        let blocks = ClaudeCodeProvider.imageBlocks(messages)
+        XCTAssertEqual(blocks.count, 1)
+        XCTAssertEqual((blocks[0]["source"] as? [String: Any])?["data"] as? String, png.base64EncodedString())
+        XCTAssertTrue(ClaudeCodeProvider.transcript(messages).contains("attached a picture"))
+        XCTAssertTrue(ClaudeCodeProvider.imageBlocks([Message(role: .user, text: "hi")]).isEmpty)
+    }
 }

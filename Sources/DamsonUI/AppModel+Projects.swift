@@ -53,6 +53,16 @@ extension AppModel {
 
     // MARK: Editing a project
 
+    func setMode(_ projectID: String, _ mode: ProjectMode) {
+        update(projectID) { $0.mode = mode }
+    }
+
+    func renameProject(_ projectID: String, to name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        update(projectID) { $0.name = trimmed }
+    }
+
     func setBrief(_ projectID: String, _ text: String) {
         update(projectID) { $0.brief = text }
         if let p = projects.first(where: { $0.id == projectID }) {
@@ -79,6 +89,54 @@ extension AppModel {
         var id: String?
         update(projectID) { id = $0.addStep(kind: kind, at: point) }
         return id
+    }
+
+    // Documents: the files steps write and read.
+    @discardableResult
+    func addOutput(_ projectID: String, _ stepID: String) -> String? {
+        guard !isRunning(projectID) else { return nil }
+        var id: String?
+        update(projectID) { id = $0.addOutput(to: stepID) }
+        return id
+    }
+
+    func renameOutput(_ projectID: String, _ stepID: String, _ docID: String, to path: String) {
+        guard !isRunning(projectID) else { return }
+        update(projectID) { $0.renameOutput(step: stepID, doc: docID, to: path) }
+    }
+
+    func editOutput(_ projectID: String, _ stepID: String, _ docID: String, _ change: (inout FlowOutput) -> Void) {
+        guard !isRunning(projectID) else { return }
+        update(projectID) { p in
+            if let i = p.steps.firstIndex(where: { $0.id == stepID }), let o = p.steps[i].outputs.firstIndex(where: { $0.id == docID }) { change(&p.steps[i].outputs[o]) }
+        }
+    }
+
+    func removeOutput(_ projectID: String, _ stepID: String, _ docID: String) {
+        guard !isRunning(projectID) else { return }
+        update(projectID) { $0.removeOutput(step: stepID, doc: docID) }
+    }
+
+    /// A document icon's position (layout only, allowed while running).
+    func moveDocument(_ projectID: String, _ stepID: String, _ docID: String, to point: CGPoint) {
+        update(projectID) { p in
+            guard let i = p.steps.firstIndex(where: { $0.id == stepID }) else { return }
+            if docID == StepDocument.mainID { p.steps[i].docX = Double(point.x); p.steps[i].docY = Double(point.y) }
+            else if let o = p.steps[i].outputs.firstIndex(where: { $0.id == docID }) { p.steps[i].outputs[o].x = Double(point.x); p.steps[i].outputs[o].y = Double(point.y) }
+        }
+    }
+
+    @discardableResult
+    func addInput(_ projectID: String, to stepID: String, from: String, file: String) -> Bool {
+        guard !isRunning(projectID) else { return false }
+        var ok = false
+        update(projectID) { ok = $0.addInput(to: stepID, from: from, file: file) }
+        return ok
+    }
+
+    func removeInput(_ projectID: String, from stepID: String, _ input: FlowInput) {
+        guard !isRunning(projectID) else { return }
+        update(projectID) { $0.removeInput(from: stepID, input) }
     }
 
     func removeStep(_ projectID: String, _ stepID: String) {
@@ -325,8 +383,12 @@ extension AppModel {
         log(id, "▶ \(step.title): \(agent.name) (\(team.name)) started")
         defer { for member in crew { personStatus[member.person.id] = nil } }
 
+        for input in step.inputs where !FileManager.default.fileExists(atPath: project.folderURL.appendingPathComponent(input.file).path) {
+            return fail("The input \(input.file) (from \(project.step(input.step)?.title ?? input.step)) does not exist yet. Run that step first, or remove the input.")
+        }
         let output = step.outputFile.map { project.folderURL.appendingPathComponent($0) }
         if let output { try? FileManager.default.removeItem(at: output) }
+        for o in step.outputs { try? FileManager.default.removeItem(at: project.folderURL.appendingPathComponent(o.path)) }
         let instruction = ProjectFlow.instruction(for: step, project: project)
         var bad = false
         do {
@@ -345,7 +407,7 @@ extension AppModel {
                     """
                 }
                 summary = try await engine.runTask(as: person, company: company, instruction: text,
-                                                   directory: project.folderURL, stage: step.id) { [weak self] tool in
+                                                   directory: project.folderURL, stage: step.id, policy: project.mode.policy(for: step)) { [weak self] tool in
                     Task { @MainActor in self?.log(id, "   \(person.firstName): \(tool)") }
                 }
                 personStatus[person.id] = nil
@@ -359,6 +421,10 @@ extension AppModel {
                 if bad && (step.kind.stopsOnBadVerdict || step.kind == .task) && !failBranch {
                     return fail("\(file) reports a failure. Read it, fix the cause and retry.")
                 }
+            }
+            for o in step.outputs {
+                let size = (try? FileManager.default.attributesOfItem(atPath: project.folderURL.appendingPathComponent(o.path).path)[.size] as? Int) ?? 0
+                guard size > 0 else { return fail("\(agent.name) finished but did not write \(o.path).") }
             }
             if bad, let loop = project.edges.first(where: { $0.loop && $0.from == step.id }) {
                 // Send the work back: the target and everything after it (this step included) run again.

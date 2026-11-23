@@ -30,11 +30,21 @@ struct MessageRow: View {
                 if message.kind == .system {
                     Label("Needs you", systemImage: "hand.raised").font(.caption).foregroundStyle(.orange)
                 }
-                Text(message.text.isEmpty ? "\u{2026}" : message.text)
+                if !message.images.isEmpty {
+                    HStack(spacing: 6) {
+                        ForEach(Array(message.images.enumerated()), id: \.offset) { _, data in
+                            if let image = NSImage(data: data) {
+                                Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: 240, maxHeight: 200)
+                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                            }
+                        }
+                    }
+                }
+                if !(message.text.isEmpty && !message.images.isEmpty) { Text(message.text.isEmpty ? "\u{2026}" : message.text)
                     .textSelection(.enabled)
                     .italic(message.isLive)
                     .opacity(message.isLive ? 0.7 : 1)
-                    .foregroundStyle(isUser ? Color.white : Color.primary)
+                    .foregroundStyle(isUser ? Color.white : Color.primary) }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)

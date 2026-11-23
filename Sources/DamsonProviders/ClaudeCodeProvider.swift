@@ -85,10 +85,23 @@ public final class ClaudeCodeProvider: LLMProvider, @unchecked Sendable {
                     parts.append("[You]\n<tool_call>{\"name\": \"\(call.name)\", \"input\": \(call.input.jsonString())}</tool_call>")
                 case .toolResult(_, let content, let isError):
                     parts.append("[Tool result\(isError ? " (error)" : "")]\n\(content)")
+                case .image:
+                    parts.append((m.role == .user ? "[User]\n" : "[You]\n") + "(The user attached a picture here. It is included with this message.)")
                 }
             }
         }
         return parts.joined(separator: "\n\n") + "\n\n[You]\n"
+    }
+
+    /// The pictures in a conversation, in order, as stream-json content blocks.
+    static func imageBlocks(_ messages: [Message]) -> [[String: Any]] {
+        var out: [[String: Any]] = []
+        for m in messages {
+            for case .image(let type, let data) in m.content {
+                out.append(["type": "image", "source": ["type": "base64", "media_type": type, "data": data.base64EncodedString()]])
+            }
+        }
+        return out
     }
 
     /// Splits a finished reply into plain text and tool calls.
@@ -150,10 +163,11 @@ public final class ClaudeCodeProvider: LLMProvider, @unchecked Sendable {
                     defer { if ownScratch { try? FileManager.default.removeItem(at: scratch) } }
                     try? FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
 
+                    let pictures = Self.imageBlocks(request.messages)
                     process.executableURL = URL(fileURLWithPath: cli.path)
                     process.currentDirectoryURL = scratch
                     process.arguments = ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
-                                         "--model", request.model] + skillArgs + [
+                                         "--model", request.model] + (pictures.isEmpty ? [] : ["--input-format", "stream-json"]) + skillArgs + [
                                          "--no-session-persistence",
                                          "--system-prompt", request.system + Self.toolPrompt(request.tools)]
                     var env = ProcessInfo.processInfo.environment
@@ -175,7 +189,17 @@ public final class ClaudeCodeProvider: LLMProvider, @unchecked Sendable {
                     }
                     defer { stderr.fileHandleForReading.readabilityHandler = nil }
                     try process.run()
-                    stdin.fileHandleForWriting.write(Self.transcript(request.messages).data(using: .utf8) ?? Data())
+                    if pictures.isEmpty {
+                        stdin.fileHandleForWriting.write(Self.transcript(request.messages).data(using: .utf8) ?? Data())
+                    } else {
+                        // Pictures need the structured input: one user message with the transcript and the pictures.
+                        let content: [[String: Any]] = [["type": "text", "text": Self.transcript(request.messages)]] + pictures
+                        let line: [String: Any] = ["type": "user", "message": ["role": "user", "content": content]]
+                        if var data = try? JSONSerialization.data(withJSONObject: line) {
+                            data.append(0x0A)
+                            stdin.fileHandleForWriting.write(data)
+                        }
+                    }
                     try? stdin.fileHandleForWriting.close()
 
                     var full = ""

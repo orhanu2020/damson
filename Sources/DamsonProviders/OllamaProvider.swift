@@ -117,6 +117,7 @@ public final class OllamaProvider: LLMProvider, @unchecked Sendable {
                 messages.append(entry)
             } else {
                 var textParts: [String] = []
+                var pictures: [String] = []
                 for block in m.content {
                     switch block {
                     case .text(let t):
@@ -125,12 +126,16 @@ public final class OllamaProvider: LLMProvider, @unchecked Sendable {
                         var entry: [String: Any] = ["role": "tool", "content": content]
                         if let name = namesByID[toolUseID] { entry["tool_name"] = name }
                         messages.append(entry)
+                    case .image(_, let data):
+                        pictures.append(data.base64EncodedString())
                     case .toolUse:
                         break
                     }
                 }
-                if !textParts.isEmpty {
-                    messages.append(["role": "user", "content": textParts.joined(separator: "\n")])
+                if !textParts.isEmpty || !pictures.isEmpty {
+                    var entry: [String: Any] = ["role": "user", "content": textParts.joined(separator: "\n")]
+                    if !pictures.isEmpty { entry["images"] = pictures }
+                    messages.append(entry)
                 }
             }
         }

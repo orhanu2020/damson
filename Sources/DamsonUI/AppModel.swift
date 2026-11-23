@@ -16,6 +16,8 @@ public struct ChatMessage: Identifiable, Equatable {
     public var text: String
     public var date = Date()
     public var viaVoice = false
+    /// Pictures attached to the message (PNG data).
+    public var images: [Data] = []
     /// True while the user is still speaking and the text is a live, unfinished transcript.
     public var isLive = false
 }
@@ -41,6 +43,8 @@ public final class AppModel: ObservableObject {
     /// The project shown on the Projects page (chosen in the sidebar), and the New project sheet.
     @Published var selectedProjectID: String?
     @Published var showNewProject = false
+    /// Set to open a project from another page (the sidebar follows).
+    @Published var openProject: String?
     /// An agent being created from a process step: it is added to that step when saved.
     var pendingStepAgent: (project: String, step: String)?
     @Published var projects: [Project] = ProjectStore.load() {
@@ -66,7 +70,6 @@ public final class AppModel: ObservableObject {
     @Published var projectLog: [String: [String]] = [:]
     var projectTasks: [String: Task<Void, Never>] = [:]
     @Published var companySheet: CompanySheet?
-    @Published var teamToDelete: Team?
     @Published public var personChats: [String: [ChatMessage]] = [:]
     @Published public var personResponding: Set<String> = []
     /// True while the Company tab is open: spoken commands naming a person or team go there instead of the chat.

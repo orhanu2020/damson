@@ -26,9 +26,6 @@ struct ProjectsView: View {
         }
         .background(Theme.chatBackground)
         .navigationTitle(project?.name ?? "Projects")
-        .sheet(isPresented: $model.showNewProject) {
-            NewProjectSheet(model: model) { model.selectedProjectID = $0.id }
-        }
     }
 
 }
@@ -57,6 +54,8 @@ private struct ProjectDetail: View {
     @State private var gateNote = ""
     @State private var tab = Tab.overview
     @State private var draftBrief = ""
+    @State private var renaming = false
+    @State private var renameDraft = ""
 
     enum Tab: String, CaseIterable, Identifiable {
         case overview = "Overview", process = "Process", progress = "Progress"
@@ -66,7 +65,7 @@ private struct ProjectDetail: View {
     private var running: Bool { model.isRunning(project.id) }
     private var missing: [TeamRole] { model.missingTeams(for: project) }
     private var files: [String] {
-        let known = project.steps.compactMap { $0.outputFile } + ["reports/production-release.md"]
+        let known = project.steps.flatMap { $0.documents.map { $0.path } } + ["reports/production-release.md"]
         var seen = Set<String>()
         return known.filter { seen.insert($0).inserted && FileManager.default.fileExists(atPath: project.folderURL.appendingPathComponent($0).path) }
     }
@@ -111,6 +110,13 @@ private struct ProjectDetail: View {
         .sheet(item: $editingEnv) { env in
             EnvironmentSheet(env: env) { model.updateEnvironment(project.id, $0) }
         }
+        .alert("Rename project", isPresented: $renaming) {
+            TextField("Project name", text: $renameDraft)
+            Button("Rename") { model.renameProject(project.id, to: renameDraft) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Only the name changes. The project folder keeps its name on disk.")
+        }
         .confirmationDialog("Delete project \(project.name)?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("Delete from list (files stay on disk)", role: .destructive) { model.deleteProject(project.id) }
         }
@@ -120,6 +126,8 @@ private struct ProjectDetail: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(project.name).font(.title2.weight(.semibold))
+                Button { renameDraft = project.name; renaming = true } label: { Image(systemName: "pencil") }
+                    .buttonStyle(.borderless).help("Rename the project")
                 Spacer()
                 if running {
                     Button("Stop") { model.cancelProject(project.id) }
@@ -131,6 +139,7 @@ private struct ProjectDetail: View {
                     }
                     .buttonStyle(.borderedProminent).disabled(!missing.isEmpty || project.steps.isEmpty)
                 }
+                ProjectModeButton(model: model, project: project)
                 Button { NSWorkspace.shared.activateFileViewerSelecting([project.folderURL]) } label: { Image(systemName: "folder") }
                     .help("Show the project folder in Finder")
                 Button { NSWorkspace.shared.open(project.folderURL.appendingPathComponent("reports")) } label: { Image(systemName: "doc.text.magnifyingglass") }
@@ -334,7 +343,7 @@ private struct ProjectDetail: View {
     }
 }
 
-private struct NewProjectSheet: View {
+struct NewProjectSheet: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var model: AppModel
     let onCreate: (Project) -> Void
@@ -351,22 +360,20 @@ private struct NewProjectSheet: View {
             TextEditor(text: $brief)
                 .frame(height: 160)
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.stroke))
-            Text("The project folder is created inside your workspace folder. Teams pass work to each other as files in its handoff folder.")
+            Text("The project folder is created inside your workspace folder. Nothing runs until you press Start on the project.")
                 .font(.caption2).foregroundStyle(.secondary)
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }
-                Button("Create and start") { create(start: true) }.keyboardShortcut(.defaultAction).disabled(!valid)
-                Button("Create") { create(start: false) }.disabled(!valid)
+                Button("Create") { create() }.keyboardShortcut(.defaultAction).disabled(!valid)
             }
         }
         .padding(20).frame(width: 520)
     }
 
-    private func create(start: Bool) {
+    private func create() {
         let p = model.createProject(name: name.trimmingCharacters(in: .whitespaces), brief: brief.trimmingCharacters(in: .whitespacesAndNewlines))
         onCreate(p)
-        if start && model.missingTeams(for: p).isEmpty { model.startProject(p.id) }
         dismiss()
     }
 }
@@ -409,5 +416,64 @@ private struct EnvironmentSheet: View {
             }
         }
         .padding(20).frame(width: 460)
+    }
+}
+
+
+/// The project's mode: how agents are allowed to work (like the permission modes of Claude Code).
+struct ProjectModeButton: View {
+    @ObservedObject var model: AppModel
+    let project: Project
+    @State private var shown = false
+    @State private var confirmBypass = false
+
+    private func choose(_ mode: ProjectMode) {
+        shown = false
+        if mode == .bypass && project.mode != .bypass { confirmBypass = true } else { model.setMode(project.id, mode) }
+    }
+
+    var body: some View {
+        Button { shown.toggle() } label: {
+            HStack(spacing: 5) {
+                Image(systemName: project.mode.icon)
+                Text(project.mode.title)
+                Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
+            }
+            .foregroundStyle(project.mode == .bypass ? Color.orange : Color.primary)
+        }
+        .help("Mode: \(project.mode.summary)")
+        .popover(isPresented: $shown, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Mode").font(.callout).foregroundStyle(.secondary).padding(.horizontal, 12).padding(.top, 10).padding(.bottom, 4)
+                ForEach(Array(ProjectMode.allCases.enumerated()), id: \.element) { index, mode in
+                    Button { choose(mode) } label: {
+                        HStack(alignment: .top, spacing: 10) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(mode.title).font(.system(size: 15, weight: .medium))
+                                    .foregroundStyle(mode == .bypass ? Color.orange : Color.primary)
+                                Text(mode.summary).font(.callout).foregroundStyle(.secondary)
+                            }
+                            Spacer(minLength: 24)
+                            if project.mode == mode { Image(systemName: "checkmark").foregroundStyle(Color.accentColor) }
+                            Text("\(index + 1)").font(.callout).foregroundStyle(.secondary).frame(width: 14)
+                        }
+                        .padding(.horizontal, 12).padding(.vertical, 7)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: [])
+                    .help(mode.detail)
+                }
+                Text(project.mode.detail).font(.caption).foregroundStyle(.tertiary)
+                    .padding(.horizontal, 12).padding(.vertical, 8).frame(width: 330, alignment: .leading)
+            }
+            .frame(width: 330)
+            .padding(.bottom, 4)
+        }
+        .confirmationDialog("Let agents work without asking?", isPresented: $confirmBypass, titleVisibility: .visible) {
+            Button("Bypass permissions", role: .destructive) { model.setMode(project.id, .bypass) }
+        } message: {
+            Text("Agents will change files, run any command and deploy without showing approval cards, including dangerous ones. Only the approval steps you put in the process still wait for you.")
+        }
     }
 }

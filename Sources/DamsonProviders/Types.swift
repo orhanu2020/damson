@@ -30,6 +30,8 @@ public enum ContentBlock: Sendable, Equatable {
     case text(String)
     case toolUse(ToolCall)
     case toolResult(toolUseID: String, content: String, isError: Bool)
+    /// A picture the user attached (PNG or JPEG bytes).
+    case image(mediaType: String, data: Data)
 }
 
 public enum MessageRole: String, Sendable, Codable {

@@ -24,6 +24,35 @@ final class TrustTests: XCTestCase {
         return p.verdict(tool: tool, input: .object(["command": .string(command)]), context: context())
     }
 
+    func modeContext(_ policy: TaskPolicy) -> ToolContext {
+        ToolContext(taskID: "t", subtaskID: "s", scratchDir: FileManager.default.temporaryDirectory, workspaceDir: ws, policy: policy)
+    }
+
+    func testProjectModes() {
+        let global = policy(.ask)
+        let shell = JSONValue.object(["command": .string("mkdir build")])
+        let write = JSONValue.object(["path": .string("app/main.py")])
+        let report = JSONValue.object(["path": .string("reports/x.md")])
+        // Auto: the project folder is trusted even when Settings asks for everything.
+        XCTAssertEqual(global.verdict(tool: "shell", input: shell, context: modeContext(.workspace)), .autoApprove)
+        XCTAssertEqual(global.verdict(tool: "shell", input: .object(["command": .string("open -a Safari")]), context: modeContext(.workspace)), .askUser)
+        // Manual always asks, even under full trust.
+        XCTAssertEqual(policy(.full).verdict(tool: "shell", input: shell, context: modeContext(.ask)), .askUser)
+        // Accept edits: files yes, commands no.
+        XCTAssertEqual(global.verdict(tool: "write_file", input: write, context: modeContext(.acceptEdits)), .autoApprove)
+        XCTAssertEqual(global.verdict(tool: "shell", input: shell, context: modeContext(.acceptEdits)), .askUser)
+        XCTAssertEqual(global.verdict(tool: "write_file", input: .object(["path": .string("/etc/hosts")]), context: modeContext(.acceptEdits)), .askUser)
+        // Plan: only the step's own file; everything else is refused without a card.
+        let plan = modeContext(.plan(writable: ["reports/x.md"]))
+        XCTAssertEqual(global.verdict(tool: "write_file", input: report, context: plan), .autoApprove)
+        if case .deny = global.verdict(tool: "write_file", input: write, context: plan) {} else { XCTFail("plan should refuse other writes") }
+        if case .deny = global.verdict(tool: "shell", input: shell, context: plan) {} else { XCTFail("plan should refuse commands") }
+        // Bypass: nothing asks, not even the dangerous list or other tools.
+        XCTAssertEqual(global.verdict(tool: "shell", input: shell, context: modeContext(.bypass)), .autoApprove)
+        XCTAssertEqual(global.verdict(tool: "shell", input: .object(["command": .string("sudo ls")]), context: modeContext(.bypass)), .autoApprove)
+        XCTAssertEqual(global.verdict(tool: "browser_click", input: .object([:]), context: modeContext(.bypass)), .autoApprove)
+    }
+
     func testAskLevelNeverAutoApproves() {
         let p = policy(.ask)
         for command in ["mkdir x", "touch a", "open -a Safari"] {

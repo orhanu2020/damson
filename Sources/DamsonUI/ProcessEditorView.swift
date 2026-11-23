@@ -9,11 +9,13 @@ struct ProcessEditorView: View {
     @ObservedObject var model: AppModel
     let project: Project
 
-    enum Selection: Equatable { case step(String), note(String), edge(String) }
+    enum Selection: Equatable { case step(String), note(String), edge(String), doc(String, String) }
     @State private var sel: Selection?
     /// Several steps and notes selected together ("s:<id>" / "n:<id>"): by shift-click or by dragging a region.
     @State private var picked: Set<String> = []
     @State private var marquee: (start: CGPoint, current: CGPoint)?
+    @State private var docStart: [String: CGPoint] = [:]
+    @State private var docMoving: [String: CGPoint] = [:]
     @FocusState private var canvasFocus: Bool
     @State private var noteStart: [String: CGPoint] = [:]
     @State private var noteMoving: [String: CGPoint] = [:]
@@ -58,7 +60,7 @@ struct ProcessEditorView: View {
             switch current {
             case .step(let id): group.insert("s:" + id)
             case .note(let id): group.insert("n:" + id)
-            case .edge: break
+            case .edge, .doc: break
             }
         }
         if group.contains(key) { group.remove(key) } else { group.insert(key) }
@@ -86,6 +88,7 @@ struct ProcessEditorView: View {
         case .step(let id): if !running { model.removeStep(project.id, id) }
         case .note(let id): model.removeNote(project.id, id)
         case .edge(let id): if !running { model.setEdge(project.id, id, condition: nil) }
+        case .doc(let stepID, let docID): if docID != StepDocument.mainID { model.removeOutput(project.id, stepID, docID) }
         case nil: return
         }
         sel = nil
@@ -152,7 +155,7 @@ struct ProcessEditorView: View {
             switch current {
             case .step(let id): group.insert("s:" + id)
             case .note(let id): group.insert("n:" + id)
-            case .edge: break
+            case .edge, .doc: break
             }
         }
         for st in project.steps where rect(st).intersects(r) { group.insert("s:" + st.id) }
@@ -199,6 +202,40 @@ struct ProcessEditorView: View {
         return dy > 0 ? .bottom : .top
     }
 
+    // MARK: Documents
+
+    static let docSize = CGSize(width: 78, height: 88)
+
+    /// Where a step's document icon sits: where the user put it, else in a row under the step.
+    private func docRect(_ step: FlowStep, _ doc: StepDocument) -> CGRect {
+        let key = step.id + "|" + doc.id
+        if let p = docMoving[key] { return CGRect(origin: p, size: Self.docSize) }
+        var stored: CGPoint?
+        if doc.primary, let x = step.docX, let y = step.docY { stored = CGPoint(x: x, y: y) }
+        else if let o = step.outputs.first(where: { $0.id == doc.id }), let x = o.x, let y = o.y { stored = CGPoint(x: x, y: y) }
+        if let stored { return CGRect(origin: stored, size: Self.docSize) }
+        let docs = step.documents
+        let index = docs.firstIndex(where: { $0.id == doc.id }) ?? 0
+        let r = rect(step)
+        let total = CGFloat(docs.count) * 86 - 8
+        return CGRect(x: r.midX - total / 2 + CGFloat(index) * 86, y: r.maxY + 78, width: Self.docSize.width, height: Self.docSize.height)
+    }
+
+    private func nearestSide(of box: CGRect, to p: CGPoint) -> FlowSide {
+        let dx = (p.x - box.midX) / box.width, dy = (p.y - box.midY) / box.height
+        if abs(dx) > abs(dy) { return dx > 0 ? .right : .left }
+        return dy > 0 ? .bottom : .top
+    }
+
+    private func sidePoint(_ box: CGRect, _ side: FlowSide) -> CGPoint {
+        switch side {
+        case .right: return CGPoint(x: box.maxX, y: box.midY)
+        case .left: return CGPoint(x: box.minX, y: box.midY)
+        case .top: return CGPoint(x: box.midX, y: box.minY)
+        case .bottom: return CGPoint(x: box.midX, y: box.maxY)
+        }
+    }
+
     /// The outputs of a step that lead nowhere yet (they get a + button).
     private func openOutputs(_ step: FlowStep) -> [EdgeCondition] {
         let out = project.edges.filter { $0.from == step.id }
@@ -212,8 +249,9 @@ struct ProcessEditorView: View {
     private var contentSize: CGSize {
         let noteX = project.notes.map { noteOrigin($0).x + noteSize($0).width }.max() ?? 0
         let noteY = project.notes.map { noteOrigin($0).y + noteSize($0).height }.max() ?? 0
-        let maxX = max(noteX, project.steps.map { rect($0).maxX }.max() ?? 0)
-        let maxY = max(noteY, project.steps.map { rect($0).maxY }.max() ?? 0)
+        let docs = project.steps.flatMap { st in st.documents.map { docRect(st, $0) } }
+        let maxX = max(noteX, project.steps.map { rect($0).maxX }.max() ?? 0, docs.map { $0.maxX }.max() ?? 0)
+        let maxY = max(noteY, project.steps.map { rect($0).maxY }.max() ?? 0, docs.map { $0.maxY }.max() ?? 0)
         return CGSize(width: max(900, maxX + 260), height: max(460, maxY + 280))
     }
 
@@ -309,6 +347,10 @@ struct ProcessEditorView: View {
             if let edge = project.edges.first(where: { $0.id == id }) {
                 EdgeInspector(model: model, project: project, edge: edge, select: { sel = $0 })
             }
+        case .doc(let stepID, let docID):
+            if let step = project.step(stepID), let doc = step.documents.first(where: { $0.id == docID }) {
+                OutputInspector(model: model, project: project, step: step, doc: doc, select: { sel = $0 })
+            }
         case nil:
             InspectorHelp()
         }
@@ -390,6 +432,23 @@ struct ProcessEditorView: View {
                     draw(context, from: s.point, fromSide: s.side, to: f.point, toSide: f.side, legacyLoop: edge.loop && edge.fromSide == nil && edge.toSide == nil,
                          color: chosen ? Theme.green : lineColor(edge), dashed: edge.loop, width: chosen ? 3 : 1.8)
                 }
+                // Documents: a thin dotted line from the step that writes them, and a blue dashed arrow to each step that reads them.
+                for step in project.steps {
+                    let r = rect(step)
+                    for doc in step.documents {
+                        let d = docRect(step, doc)
+                        var link = Path(); link.move(to: CGPoint(x: r.midX, y: r.maxY)); link.addLine(to: CGPoint(x: d.midX, y: d.minY))
+                        context.stroke(link, with: .color(Color.secondary.opacity(0.4)), style: StrokeStyle(lineWidth: 1.2, dash: [2, 3]))
+                    }
+                    for input in step.inputs {
+                        guard let producer = project.step(input.step), let doc = producer.documents.first(where: { $0.path == input.file }) else { continue }
+                        let d = docRect(producer, doc), c = rect(step)
+                        let from = nearestSide(of: d, to: CGPoint(x: c.midX, y: c.midY)), to = nearestSide(of: c, to: CGPoint(x: d.midX, y: d.midY))
+                        let chosen = sel == .doc(producer.id, doc.id)
+                        draw(context, from: sidePoint(d, from), fromSide: from, to: sidePoint(c, to), toSide: to, legacyLoop: false,
+                             color: chosen ? Theme.green : Color.blue.opacity(0.7), dashed: true, width: chosen ? 2.4 : 1.4)
+                    }
+                }
                 // Short stubs from open outputs to their + buttons.
                 for step in project.steps where !running {
                     for c in openOutputs(step) {
@@ -411,6 +470,9 @@ struct ProcessEditorView: View {
             .allowsHitTesting(false)
 
             ForEach(project.notes) { note in noteView(note) }
+            ForEach(project.steps) { step in
+                ForEach(step.documents) { doc in docNode(step, doc) }
+            }
             ForEach(project.edges) { edge in
                 if let a = project.step(edge.from), let b = project.step(edge.to) {
                     edgeHandle(edge, a, b)
@@ -558,6 +620,42 @@ struct ProcessEditorView: View {
         .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
         .position(x: p.x + 38, y: p.y)
         .help("Add the next step")
+    }
+
+    // MARK: Document icons
+
+    private func docNode(_ step: FlowStep, _ doc: StepDocument) -> some View {
+        let r = docRect(step, doc)
+        let key = step.id + "|" + doc.id
+        let chosen = sel == .doc(step.id, doc.id)
+        let tint: Color = step.status == .done ? Theme.onlineGreen : Color.blue
+        return VStack(spacing: 4) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8).fill(Theme.card)
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(chosen ? Theme.green : tint.opacity(0.55), lineWidth: chosen ? 3 : 1.4))
+                    .shadow(color: .black.opacity(chosen ? 0.2 : 0.08), radius: chosen ? 5 : 2, y: 1)
+                Image(systemName: doc.primary ? "doc.text.fill" : "doc.badge.plus").font(.system(size: 26)).foregroundStyle(tint)
+            }
+            .frame(width: 46, height: 54)
+            Text((doc.path as NSString).lastPathComponent).font(.system(size: 11)).foregroundStyle(.secondary)
+                .lineLimit(2).multilineTextAlignment(.center)
+        }
+        .frame(width: r.width, height: r.height, alignment: .top)
+        .contentShape(Rectangle())
+        .gesture(DragGesture(minimumDistance: 3, coordinateSpace: .named("canvas"))
+            .onChanged { g in
+                let start = docStart[key] ?? r.origin
+                docStart[key] = start
+                docMoving[key] = CGPoint(x: max(0, start.x + g.translation.width), y: max(0, start.y + g.translation.height))
+                sel = .doc(step.id, doc.id); picked = []
+            }
+            .onEnded { _ in
+                if let p = docMoving[key] { model.moveDocument(project.id, step.id, doc.id, to: p) }
+                docMoving[key] = nil; docStart[key] = nil
+            })
+        .onTapGesture { sel = .doc(step.id, doc.id); picked = [] }
+        .help(doc.path)
+        .offset(x: r.minX, y: r.minY)
     }
 
     // MARK: Notes
@@ -780,6 +878,82 @@ struct ProcessEditorView: View {
     }
 }
 
+/// A document on the canvas: one output of a step.
+private struct OutputInspector: View {
+    @ObservedObject var model: AppModel
+    let project: Project
+    let step: FlowStep
+    let doc: StepDocument
+    let select: (ProcessEditorView.Selection?) -> Void
+    @State private var draft = ""
+    @FocusState private var focused: Bool
+
+    private var running: Bool { model.isRunning(project.id) }
+    private var editablePath: Bool { !doc.primary || step.kind == .task }
+    private var fileURL: URL { project.folderURL.appendingPathComponent(doc.path) }
+    private func commit() { if draft != doc.path { model.renameOutput(project.id, step.id, doc.id, to: draft) } }
+
+    var body: some View {
+        let users = project.consumers(of: step.id, file: doc.path)
+        let candidates = project.steps.filter { $0.id != step.id && $0.kind != .approval && !users.contains($0) }
+        InspectorCard {
+            HStack {
+                Image(systemName: "doc.text.fill").foregroundStyle(Color.blue)
+                Text("Document").font(.title3.weight(.semibold))
+                Spacer()
+                if !doc.primary {
+                    Button(role: .destructive) { model.removeOutput(project.id, step.id, doc.id); select(.step(step.id)) } label: { Image(systemName: "trash") }
+                        .help("Remove this output").disabled(running)
+                }
+            }
+            Text("Written by").font(.callout.weight(.semibold))
+            Button { select(.step(step.id)) } label: { Label(step.title, systemImage: step.kind.icon) }.buttonStyle(.link)
+
+            Text("File").font(.callout.weight(.semibold))
+            if editablePath {
+                TextField("reports/name.md", text: $draft).textFieldStyle(.roundedBorder)
+                    .focused($focused).onSubmit(commit)
+                    .onChange(of: focused) { _, now in if !now { commit() } }
+                Text("Relative to the project folder.").font(.caption).foregroundStyle(.tertiary)
+            } else {
+                Text(doc.path).font(.body).textSelection(.enabled)
+                Text("The standard output of this kind of step: its name is fixed.").font(.caption).foregroundStyle(.tertiary)
+            }
+
+            if !doc.primary {
+                Text("What should it contain?").font(.callout.weight(.semibold))
+                TextEditor(text: Binding(get: { doc.note }, set: { v in model.editOutput(project.id, step.id, doc.id) { $0.note = v } }))
+                    .font(.body).frame(height: 90).overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.stroke))
+            }
+
+            Divider()
+            Text("Used as input by").font(.callout.weight(.semibold))
+            if users.isEmpty { Text("No step reads it yet.").font(.caption).foregroundStyle(.tertiary) }
+            ForEach(users) { user in
+                HStack(spacing: 6) {
+                    Button { select(.step(user.id)) } label: { Label(user.title, systemImage: user.kind.icon).lineLimit(1) }.buttonStyle(.plain)
+                    Spacer()
+                    Button { model.removeInput(project.id, from: user.id, FlowInput(step: step.id, file: doc.path)) } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                        .buttonStyle(.plain).disabled(running).help("Stop using it as an input")
+                }
+            }
+            Menu {
+                ForEach(candidates) { c in Button { model.addInput(project.id, to: c.id, from: step.id, file: doc.path) } label: { Label(c.title, systemImage: c.kind.icon) } }
+            } label: { Label("Use as input in\u{2026}", systemImage: "arrow.right.doc.on.clipboard") }
+                .menuStyle(.borderlessButton).fixedSize().disabled(running || candidates.isEmpty)
+
+            if FileManager.default.fileExists(atPath: fileURL.path) {
+                Divider()
+                Button { NSWorkspace.shared.open(fileURL) } label: { Label("Open the file", systemImage: "arrow.up.forward.app") }
+            }
+            if running { Text("Editing is locked while the process runs.").font(.caption).foregroundStyle(.orange) }
+        }
+        .onAppear { draft = doc.path }
+        .onChange(of: doc.path) { _, new in draft = new }
+        .id(step.id + "|" + doc.id)
+    }
+}
+
 private struct MultiInspector: View {
     let count: Int
     let steps: Int
@@ -842,6 +1016,7 @@ private struct InspectorHelp: View {
                 Text("**Click a tile** or a note and change everything about it here: name, description, who does it, connections. Nothing is edited on the canvas itself.")
                 Text("**Click the dot on an arrow** to select it. Here you can label it, choose the sides it leaves from and enters at, or put a step in the middle. Drag the green handles on its ends to move them to another side or step. Delete removes it.")
                 Text("Review, test and deploy steps have a pass and a fail output. Connect fail back to an earlier step to make a rework loop (at most \(ProjectFlow.maxLoops) rounds).")
+                Text("**Documents** under a step are its outputs. Add outputs and choose a step's inputs (files other steps wrote) in the step's settings. A blue dashed arrow shows a document being read by a step.")
                 Text("Press \u{232B} to delete what is selected.")
             }.font(.callout).foregroundStyle(.secondary)
         }
@@ -976,16 +1151,14 @@ private struct StepInspector: View {
                 TextEditor(text: Binding(get: { step.extra }, set: { v in edit { $0.extra = v } }))
                     .font(.body).frame(height: 100)
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.stroke))
-                Text("Output").font(.callout.weight(.semibold))
-                if step.kind == .task {
-                    TextField("Result file", text: Binding(get: { step.outputName }, set: { v in edit { $0.outputName = v } }),
-                              prompt: Text("reports/\(step.id).md")).textFieldStyle(.roundedBorder)
-                } else if let f = step.outputFile {
-                    Text("Writes \(f)").font(.callout).foregroundStyle(.secondary)
-                }
                 if step.kind.branches {
                     Text("Ends with a Verdict line. Fail sends the work along the fail output.").font(.caption).foregroundStyle(.tertiary)
                 }
+            }
+
+            if step.kind != .approval {
+                Divider()
+                documentsSection
             }
 
             Divider()
@@ -1048,6 +1221,61 @@ private struct StepInspector: View {
     private func usageLabel(_ id: String) -> String {
         let n = model.usage(of: id).count
         return n == 0 ? "not used yet" : n == 1 ? "in 1 project" : "in \(n) projects"
+    }
+
+    /// What the step reads and writes. Outputs show as documents on the canvas.
+    @ViewBuilder private var documentsSection: some View {
+        let others = project.steps.filter { $0.id != step.id && !$0.documents.isEmpty }
+        Text("Outputs").font(.callout.weight(.semibold))
+        ForEach(step.documents) { doc in
+            HStack(spacing: 6) {
+                Image(systemName: doc.primary ? "doc.text.fill" : "doc.badge.plus").foregroundStyle(Color.blue)
+                Button { select(.doc(step.id, doc.id)) } label: { Text(doc.path).font(.callout).lineLimit(1).truncationMode(.middle) }.buttonStyle(.plain)
+                Spacer()
+                if !doc.primary {
+                    Button { model.removeOutput(project.id, step.id, doc.id) } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                        .buttonStyle(.plain).disabled(running).help("Remove this output")
+                }
+            }
+        }
+        Button { if let id = model.addOutput(project.id, step.id) { select(.doc(step.id, id)) } } label: { Label("Add output\u{2026}", systemImage: "doc.badge.plus") }
+            .disabled(running)
+
+        Text("Inputs").font(.callout.weight(.semibold)).padding(.top, 4)
+        if step.inputs.isEmpty {
+            Text("None chosen: the agent reads the standard files for this kind of step.").font(.caption).foregroundStyle(.tertiary)
+        }
+        ForEach(step.inputs) { input in
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.down.doc").foregroundStyle(Color.blue)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(input.file).font(.callout).lineLimit(1).truncationMode(.middle)
+                    Text("from \(project.step(input.step)?.title ?? input.step)").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button { model.removeInput(project.id, from: step.id, input) } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                    .buttonStyle(.plain).disabled(running).help("Remove this input")
+            }
+        }
+        HStack {
+            Menu {
+                ForEach(others) { other in
+                    Section(other.title) {
+                        ForEach(other.documents) { doc in
+                            Button(doc.path) { model.addInput(project.id, to: step.id, from: other.id, file: doc.path) }
+                                .disabled(step.inputs.contains { $0.step == other.id && $0.file == doc.path })
+                        }
+                    }
+                }
+            } label: { Label("Add input\u{2026}", systemImage: "arrow.down.doc") }
+                .menuStyle(.borderlessButton).fixedSize().disabled(running || others.isEmpty)
+            Button("From connected steps") {
+                for e in project.edges where !e.loop && e.to == step.id {
+                    for doc in project.step(e.from)?.documents ?? [] { model.addInput(project.id, to: step.id, from: e.from, file: doc.path) }
+                }
+            }
+            .controlSize(.small).disabled(running).help("Add every output of the steps that lead into this one")
+        }
     }
 
     @ViewBuilder private var connections: some View {

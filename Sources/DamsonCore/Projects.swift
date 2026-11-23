@@ -1,4 +1,5 @@
 import Foundation
+import DamsonTools
 
 // MARK: - The delivery process
 //
@@ -131,6 +132,39 @@ public enum StepStatus: String, Codable, Sendable {
     case skipped
 }
 
+/// A file a step writes besides its standard one (a document on the canvas).
+public struct FlowOutput: Codable, Identifiable, Equatable, Sendable {
+    public var id: String
+    /// Relative to the project folder.
+    public var path: String
+    /// What the file should contain.
+    public var note: String = ""
+    /// Where its document icon sits on the canvas (nil: under the step).
+    public var x: Double?
+    public var y: Double?
+
+    public init(id: String = String(UUID().uuidString.prefix(8)).lowercased(), path: String, note: String = "") {
+        self.id = id; self.path = path; self.note = note
+    }
+}
+
+/// A file a step reads, produced by another step.
+public struct FlowInput: Codable, Identifiable, Equatable, Sendable {
+    public var step: String
+    public var file: String
+    public var id: String { "\(step)|\(file)" }
+    public init(step: String, file: String) { self.step = step; self.file = file }
+}
+
+/// One output of a step, standard or added: shown as a document on the canvas.
+public struct StepDocument: Identifiable, Equatable, Sendable {
+    public static let mainID = "main"
+    public var id: String
+    public var path: String
+    public var note: String
+    public var primary: Bool { id == StepDocument.mainID }
+}
+
 public struct FlowStep: Codable, Identifiable, Equatable, Sendable {
     public var id: String
     public var kind: StepKind
@@ -167,6 +201,12 @@ public struct FlowStep: Codable, Identifiable, Equatable, Sendable {
     public var feedback: String = ""
     /// A description for people (shown on the canvas); for approvals it is what the user is asked to check.
     public var about: String = ""
+    /// Files this step must also write, and files from other steps it reads.
+    public var outputs: [FlowOutput] = []
+    public var inputs: [FlowInput] = []
+    /// Where the standard output's document icon sits (nil: under the step).
+    public var docX: Double?
+    public var docY: Double?
 
     public init(kind: StepKind, env: String? = nil, id: String? = nil) {
         self.kind = kind
@@ -175,7 +215,7 @@ public struct FlowStep: Codable, Identifiable, Equatable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, kind, env, status, agentName, summary, error, note, name, x, y, customRole, agentIDs, extra, outputName, badVerdict, round, feedback, about
+        case id, kind, env, status, agentName, summary, error, note, name, x, y, customRole, agentIDs, extra, outputName, badVerdict, round, feedback, about, outputs, inputs, docX, docY
     }
 
     private enum LegacyKeys: String, CodingKey { case agentID }
@@ -205,6 +245,10 @@ public struct FlowStep: Codable, Identifiable, Equatable, Sendable {
         round = try c.decodeIfPresent(Int.self, forKey: .round) ?? 0
         feedback = try c.decodeIfPresent(String.self, forKey: .feedback) ?? ""
         about = try c.decodeIfPresent(String.self, forKey: .about) ?? ""
+        outputs = try c.decodeIfPresent([FlowOutput].self, forKey: .outputs) ?? []
+        inputs = try c.decodeIfPresent([FlowInput].self, forKey: .inputs) ?? []
+        docX = try c.decodeIfPresent(Double.self, forKey: .docX)
+        docY = try c.decodeIfPresent(Double.self, forKey: .docY)
     }
 
     /// The team that does the step (nil for approvals and for tasks given to one agent).
@@ -224,6 +268,14 @@ public struct FlowStep: Codable, Identifiable, Equatable, Sendable {
         case .test: return e.isEmpty ? "Test" : "Test in \(e)"
         case .task: return "Task"
         }
+    }
+
+    /// Everything this step produces: its standard file, then the files added to it.
+    public var documents: [StepDocument] {
+        var docs: [StepDocument] = []
+        if let f = outputFile { docs.append(StepDocument(id: StepDocument.mainID, path: f, note: "")) }
+        docs += outputs.map { StepDocument(id: $0.id, path: $0.path, note: $0.note) }
+        return docs
     }
 
     /// The file this step must leave behind (relative to the project folder). Approvals leave none.
@@ -292,6 +344,63 @@ public struct FlowEdge: Codable, Identifiable, Equatable, Sendable {
         label = try c.decodeIfPresent(String.self, forKey: .label) ?? ""
         fromSide = try c.decodeIfPresent(FlowSide.self, forKey: .fromSide)
         toSide = try c.decodeIfPresent(FlowSide.self, forKey: .toSide)
+    }
+}
+
+/// How agents are allowed to work in a project (like the permission modes of Claude Code).
+public enum ProjectMode: String, Codable, CaseIterable, Sendable, Identifiable {
+    case auto, manual, acceptEdits, plan, bypass
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .auto: return "Auto"
+        case .manual: return "Manual"
+        case .acceptEdits: return "Accept edits"
+        case .plan: return "Plan"
+        case .bypass: return "Bypass permissions"
+        }
+    }
+
+    public var summary: String {
+        switch self {
+        case .auto: return "Damson handles permission decisions"
+        case .manual: return "Always ask before making changes"
+        case .acceptEdits: return "Automatically accept all file edits"
+        case .plan: return "Create a plan before making changes"
+        case .bypass: return "Accepts all permissions"
+        }
+    }
+
+    public var detail: String {
+        switch self {
+        case .auto: return "File and build commands inside the project folder run without asking. Anything else, such as opening apps, other folders or online actions, asks."
+        case .manual: return "Every change shows an approval card."
+        case .acceptEdits: return "Agents write files in the project folder without asking. Commands and everything else still ask."
+        case .plan: return "Agents may only read and write their own report: each step describes what it would do and changes nothing."
+        case .bypass: return "No approval cards at all, for anything an agent does, dangerous commands included (sudo, deleting files, force pushes). Human approval steps in the process still wait for you."
+        }
+    }
+
+    public var icon: String {
+        switch self {
+        case .auto: return "sparkles"
+        case .manual: return "hand.raised"
+        case .acceptEdits: return "pencil"
+        case .plan: return "list.bullet.clipboard"
+        case .bypass: return "exclamationmark.shield"
+        }
+    }
+
+    /// The approval policy for one step: in plan mode only the step's own files may be written.
+    public func policy(for step: FlowStep) -> TaskPolicy {
+        switch self {
+        case .auto: return .workspace
+        case .manual: return .ask
+        case .acceptEdits: return .acceptEdits
+        case .plan: return .plan(writable: step.documents.map { $0.path })
+        case .bypass: return .bypass
+        }
     }
 }
 
@@ -413,6 +522,8 @@ public struct Project: Codable, Identifiable, Equatable, Sendable {
     public var teamIDs: [String] = []
     public var agentIDs: [String] = []
     public var notes: [FlowNote] = []
+    /// How agents may work here (permissions).
+    public var mode: ProjectMode = .auto
 
     public init(id: String = UUID().uuidString, name: String, brief: String, folder: String) {
         self.id = id
@@ -425,7 +536,7 @@ public struct Project: Codable, Identifiable, Equatable, Sendable {
         self.edges = ProjectFlow.chain(steps)
     }
 
-    enum CodingKeys: String, CodingKey { case id, name, brief, folder, createdAt, steps, edges, environments, teamIDs, agentIDs, notes }
+    enum CodingKeys: String, CodingKey { case id, name, brief, folder, createdAt, steps, edges, environments, teamIDs, agentIDs, notes, mode }
 
     /// Older projects get the standard process (not started) or, if they have steps but no layout, the steps in a chain.
     public init(from decoder: Decoder) throws {
@@ -443,6 +554,7 @@ public struct Project: Codable, Identifiable, Equatable, Sendable {
         teamIDs = try c.decodeIfPresent([String].self, forKey: .teamIDs) ?? []
         agentIDs = try c.decodeIfPresent([String].self, forKey: .agentIDs) ?? []
         notes = try c.decodeIfPresent([FlowNote].self, forKey: .notes) ?? []
+        mode = try c.decodeIfPresent(ProjectMode.self, forKey: .mode) ?? .auto
     }
 
     public var folderURL: URL { URL(fileURLWithPath: folder) }
@@ -488,6 +600,72 @@ public struct Project: Codable, Identifiable, Equatable, Sendable {
     public mutating func removeStep(_ id: String) {
         steps.removeAll { $0.id == id }
         edges.removeAll { $0.from == id || $0.to == id }
+        for i in steps.indices { steps[i].inputs.removeAll { $0.step == id } }
+    }
+
+    /// A safe relative path: no leading slash, no "..", no empty parts.
+    public static func cleanPath(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespaces).split(separator: "/").map(String.init).filter { $0 != ".." && $0 != "." && !$0.isEmpty }.joined(separator: "/")
+    }
+
+    /// Adds an output file to a step. Returns its id.
+    @discardableResult
+    public mutating func addOutput(to stepID: String, path: String? = nil) -> String? {
+        guard let i = steps.firstIndex(where: { $0.id == stepID }), steps[i].kind != .approval else { return nil }
+        var candidate = Self.cleanPath(path ?? "reports/\(stepID)-extra.md")
+        if candidate.isEmpty { candidate = "reports/\(stepID)-extra.md" }
+        var n = 2
+        let base = candidate
+        while steps[i].documents.contains(where: { $0.path == candidate }) {
+            let ext = (base as NSString).pathExtension
+            candidate = ((base as NSString).deletingPathExtension) + "-\(n)" + (ext.isEmpty ? "" : ".\(ext)")
+            n += 1
+        }
+        let output = FlowOutput(path: candidate)
+        steps[i].outputs.append(output)
+        return output.id
+    }
+
+    /// Changes the file name of an output. Steps that read it follow the new name.
+    public mutating func renameOutput(step stepID: String, doc docID: String, to raw: String) {
+        let path = Self.cleanPath(raw)
+        guard !path.isEmpty, let i = steps.firstIndex(where: { $0.id == stepID }),
+              let old = steps[i].documents.first(where: { $0.id == docID })?.path, old != path,
+              !steps[i].documents.contains(where: { $0.path == path }) else { return }
+        if docID == StepDocument.mainID {
+            guard steps[i].kind == .task else { return }
+            steps[i].outputName = path
+        } else if let o = steps[i].outputs.firstIndex(where: { $0.id == docID }) {
+            steps[i].outputs[o].path = path
+        }
+        for j in steps.indices {
+            for k in steps[j].inputs.indices where steps[j].inputs[k].step == stepID && steps[j].inputs[k].file == old { steps[j].inputs[k].file = path }
+        }
+    }
+
+    public mutating func removeOutput(step stepID: String, doc docID: String) {
+        guard let i = steps.firstIndex(where: { $0.id == stepID }), let doc = steps[i].documents.first(where: { $0.id == docID }), !doc.primary else { return }
+        steps[i].outputs.removeAll { $0.id == docID }
+        for j in steps.indices { steps[j].inputs.removeAll { $0.step == stepID && $0.file == doc.path } }
+    }
+
+    /// Makes `file` of step `from` an input of step `to`.
+    @discardableResult
+    public mutating func addInput(to stepID: String, from: String, file: String) -> Bool {
+        guard let i = steps.firstIndex(where: { $0.id == stepID }), stepID != from, steps[i].kind != .approval,
+              step(from)?.documents.contains(where: { $0.path == file }) == true,
+              !steps[i].inputs.contains(where: { $0.step == from && $0.file == file }) else { return false }
+        steps[i].inputs.append(FlowInput(step: from, file: file))
+        return true
+    }
+
+    public mutating func removeInput(from stepID: String, _ input: FlowInput) {
+        if let i = steps.firstIndex(where: { $0.id == stepID }) { steps[i].inputs.removeAll { $0 == input } }
+    }
+
+    /// The steps that read a file of another step.
+    public func consumers(of stepID: String, file: String) -> [FlowStep] {
+        steps.filter { $0.inputs.contains { $0.step == stepID && $0.file == file } }
     }
 
     /// The steps in process order: following the connections, ties broken by position on the canvas.
@@ -512,6 +690,8 @@ public struct Project: Codable, Identifiable, Equatable, Sendable {
         if let i = steps.firstIndex(where: { $0.id == newID }) {
             steps[i].name = original.name; steps[i].customRole = original.customRole; steps[i].agentIDs = original.agentIDs
             steps[i].extra = original.extra; steps[i].outputName = original.outputName; steps[i].about = original.about
+            steps[i].inputs = original.inputs
+            for o in original.outputs { steps[i].outputs.append(FlowOutput(path: o.path.replacingOccurrences(of: original.id, with: newID), note: o.note)) }
         }
         return newID
     }
@@ -607,7 +787,7 @@ public enum ProjectFlow {
     }
 
     public static let columnWidth = 210.0
-    public static let rowHeight = 170.0
+    public static let rowHeight = 250.0
 
     /// Lays steps out in rows of four, in order.
     public static func arrange(_ steps: inout [FlowStep]) {
@@ -750,6 +930,7 @@ public enum ProjectFlow {
         Folders: handoff/ (analysis and requirements, design, build notice), app/ (application source), tests/ (automated tests), environments/ (one file per environment: how it is provisioned and reached), deploy/ (one deploy notice per environment), reports/ (review and test reports, release report).
         Do the job with your tools, thoroughly. Do not ask the user questions; where something is unclear, make a reasonable assumption and write it down.
         When you are done, reply with a short plain summary (3 to 6 sentences) of what you produced.
+        \(project.mode == .plan ? "PLAN MODE: you may only read. Do not change anything and do not run commands that change things. Write what you WOULD do (files you would create or change, commands you would run, risks) into your output file instead of doing it." : "")
 
         """
     }
@@ -765,8 +946,17 @@ public enum ProjectFlow {
             Read \(step.feedback) first. Fix every problem it lists (code in app/, tests in tests/), run everything again, and update your own output file so it says what you changed in this round and why.
             """
         }
+        guard step.kind != .approval else { return base }
+        if !step.inputs.isEmpty {
+            let lines = step.inputs.map { "- \($0.file) (from the step \"\(project.step($0.step)?.title ?? $0.step)\")" }.joined(separator: "\n")
+            base += "\n\nINPUTS FOR THIS STEP, written by earlier steps. Read them before you start and build on them:\n" + lines
+        }
+        if !step.outputs.isEmpty {
+            let lines = step.outputs.map { "- \($0.path)" + ($0.note.isEmpty ? "" : ": \($0.note)") }.joined(separator: "\n")
+            base += "\n\nYOU MUST ALSO WRITE THESE FILES (relative to the project folder):\n" + lines
+        }
         let extra = step.extra.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !extra.isEmpty, step.kind != .task, step.kind != .approval else { return base }
+        guard !extra.isEmpty, step.kind != .task else { return base }
         return base + "\n\nADDITIONAL INSTRUCTIONS FROM THE USER:\n" + extra
     }
 
